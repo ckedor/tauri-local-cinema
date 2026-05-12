@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.vite/
+coverage/
+target/
+src-tauri/target/
+src-tauri/gen/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+Thumbs.db

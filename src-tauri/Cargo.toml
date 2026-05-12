@@ -1,0 +1,32 @@
+[package]
+name = "tauri-local-cinema"
+version = "0.1.0"
+description = "Local desktop media center scaffold"
+edition = "2021"
+
+[lib]
+name = "tauri_local_cinema_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+lofty = "0.20"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rfd = "0.14"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["protocol-asset"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+walkdir = "2.5"
+libmpv2 = "5"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
+  "Win32_System_LibraryLoader",
+] }
