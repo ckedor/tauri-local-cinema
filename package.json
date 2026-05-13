@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "build:windows:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-windows-installer.ps1",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "tauri:dev": "tauri dev",

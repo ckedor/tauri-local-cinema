@@ -151,6 +151,48 @@ npm run tauri:dev
 
 If the keys are missing, invalid, or the machine is offline, the app still behaves like a purely local media center. At the moment, that is also the default scan behavior even when the keys are present.
 
+## Build an offline Windows installer
+
+For a plain Tauri app, the Windows installer part is mostly standard. NetCrico adds one native dependency on top of that: `libmpv`.
+
+The repo is now configured to build a Windows NSIS installer that:
+
+- bundles the WebView2 offline installer, so the target machine does not need internet access
+- bundles the `libmpv` runtime files you provide
+- moves those `libmpv` DLLs next to the installed app executable so playback works after install
+
+### Minimal flow
+
+1. Download and extract a Windows `libmpv` package into `vendor/windows/mpv/`.
+2. Run `npm run build:windows:installer`.
+
+That `vendor/windows/mpv/` folder must contain:
+
+- `mpv.lib`
+- `libmpv-2.dll`
+- any extra DLLs that came with your `libmpv` package
+
+If you only see `libmpv.dll.a`, you downloaded a MinGW import library. This project builds with the default Rust `x86_64-pc-windows-msvc` toolchain on Windows, so that package is not enough. Use a Windows `libmpv` development package that includes `mpv.lib`.
+
+If your package only includes `libmpv-2.dll` and `libmpv.dll.a`, you can still use it with the current MSVC Rust toolchain by generating `mpv.lib` yourself from a Visual Studio Developer Command Prompt:
+
+```powershell
+cd vendor/windows/mpv
+lib /name:libmpv-2.dll /out:mpv.lib /MACHINE:X64
+```
+
+If `lib` is not available, install Visual Studio Build Tools 2022 with the Desktop development with C++ workload, then run the command from the developer prompt.
+
+If your `libmpv` package ships extra FFmpeg or Visual C++ runtime DLLs, keep them in the same folder. The build script will bundle every DLL from that folder.
+
+If you want to keep the `libmpv` files elsewhere, pass the path explicitly:
+
+```powershell
+npm run build:windows:installer -- -MpvDir C:\path\to\mpv
+```
+
+The generated installer is written to `src-tauri/target/release/bundle/nsis/`.
+
 ## Architecture overview
 
 NetCrico keeps the responsibility split strict:
