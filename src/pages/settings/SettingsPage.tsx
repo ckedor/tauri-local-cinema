@@ -1,19 +1,19 @@
+import { LibraryRootsField } from "@/components/ui/LibraryRootsField";
 import { SectionCard } from "@/components/ui/SectionCard";
 import {
     getInitialSetupStatus,
     pickLibraryRoot,
-    resetLibraryDatabaseAndRescan,
-    saveLibraryRoot,
-    startInitialScan
+    rescanLibrary,
+    saveLibraryRoots
 } from "@/services/tauri/commands/library";
-import { Alert, Button, CircularProgress, Stack, TextField, Typography } from "@mui/material";
+import { normalizeLibraryRootPaths, appendLibraryRootPath } from "@/utils/libraryRoots";
+import { Alert, Button, CircularProgress, Stack, Typography } from "@mui/material";
 import { useEffect, useState } from "react";
 
 export function SettingsPage() {
-  const [libraryRootPath, setLibraryRootPath] = useState("");
+  const [libraryRootPaths, setLibraryRootPaths] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [isSaving, setIsSaving] = useState(false);
-  const [isResetting, setIsResetting] = useState(false);
+  const [isRescanning, setIsRescanning] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -26,7 +26,7 @@ export function SettingsPage() {
 
     try {
       const status = await getInitialSetupStatus();
-      setLibraryRootPath(status.libraryRootPath ?? "");
+      setLibraryRootPaths(status.libraryRootPaths);
       setErrorMessage(null);
     } catch (error) {
       setErrorMessage(asMessage(error, "Nao foi possivel carregar as configuracoes."));
@@ -39,7 +39,7 @@ export function SettingsPage() {
     try {
       const nextPath = await pickLibraryRoot();
       if (nextPath) {
-        setLibraryRootPath(nextPath);
+        setLibraryRootPaths((currentPaths) => appendLibraryRootPath(currentPaths, nextPath));
         setMessage(null);
         setErrorMessage(null);
       }
@@ -48,44 +48,31 @@ export function SettingsPage() {
     }
   }
 
-  async function handleSaveAndScan() {
-    if (!libraryRootPath.trim()) {
-      setErrorMessage("Escolha uma pasta antes de salvar.");
-      return;
-    }
-
-    setIsSaving(true);
-
-    try {
-      await saveLibraryRoot(libraryRootPath.trim());
-      const total = await startInitialScan();
-      setMessage(`${total} ${total === 1 ? "item indexado" : "itens indexados"}.`);
-      setErrorMessage(null);
-    } catch (error) {
-      setErrorMessage(asMessage(error, "Nao foi possivel atualizar a biblioteca."));
-      setMessage(null);
-    } finally {
-      setIsSaving(false);
-    }
+  function handleRemoveFolder(pathIndex: number) {
+    setLibraryRootPaths((currentPaths) => currentPaths.filter((_, index) => index !== pathIndex));
+    setMessage(null);
   }
 
-  async function handleResetAndRescan() {
-    if (!libraryRootPath.trim()) {
-      setErrorMessage("Escolha uma pasta antes de reescanear tudo.");
+  async function handleSaveAndRescan() {
+    const nextPaths = normalizeLibraryRootPaths(libraryRootPaths);
+    if (nextPaths.length === 0) {
+      setErrorMessage("Escolha ao menos uma pasta antes de reescanear tudo.");
       return;
     }
 
-    setIsResetting(true);
+    setIsRescanning(true);
 
     try {
-      const total = await resetLibraryDatabaseAndRescan();
-      setMessage(`Banco apagado e biblioteca reindexada com ${total} ${total === 1 ? "item" : "itens"}.`);
+      await saveLibraryRoots(nextPaths);
+      const total = await rescanLibrary();
+      setLibraryRootPaths(nextPaths);
+      setMessage(`Biblioteca reindexada do zero com ${total} ${total === 1 ? "item" : "itens"}.`);
       setErrorMessage(null);
     } catch (error) {
-      setErrorMessage(asMessage(error, "Nao foi possivel apagar o banco e reescanear a biblioteca."));
+      setErrorMessage(asMessage(error, "Nao foi possivel reescanear a biblioteca."));
       setMessage(null);
     } finally {
-      setIsResetting(false);
+      setIsRescanning(false);
     }
   }
 
@@ -103,32 +90,20 @@ export function SettingsPage() {
               {errorMessage ? <Alert severity="error">{errorMessage}</Alert> : null}
               {message ? <Alert severity="success">{message}</Alert> : null}
 
-              <TextField
-                fullWidth
-                label="Pasta da biblioteca"
-                value={libraryRootPath}
-                InputProps={{ readOnly: true }}
-                placeholder="Selecione uma pasta"
+              <LibraryRootsField
+                disabled={isRescanning}
+                onAddPath={handlePickFolder}
+                onRemovePath={handleRemoveFolder}
+                paths={libraryRootPaths}
               />
 
-              <Alert severity="warning">
-                "Apagar banco e reescanear tudo" remove todos os registros atuais e reconstrui a biblioteca do zero.
+              <Alert severity="info">
+                O reescaneamento sempre apaga o banco atual e reconstrui a biblioteca inteira a partir das pastas salvas.
               </Alert>
 
               <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-                <Button color="secondary" onClick={handlePickFolder} variant="outlined">
-                  Escolher pasta
-                </Button>
-                <Button disabled={!libraryRootPath.trim() || isSaving} onClick={handleSaveAndScan} variant="contained">
-                  {isSaving ? "Salvando e escaneando..." : "Salvar e reescanear"}
-                </Button>
-                <Button
-                  color="error"
-                  disabled={!libraryRootPath.trim() || isResetting}
-                  onClick={handleResetAndRescan}
-                  variant="contained"
-                >
-                  {isResetting ? "Apagando banco e reescaneando..." : "Apagar banco e reescanear tudo"}
+                <Button disabled={libraryRootPaths.length === 0 || isRescanning} onClick={handleSaveAndRescan} variant="contained">
+                  {isRescanning ? "Reescaneando biblioteca..." : "Salvar pastas e reescanear tudo"}
                 </Button>
               </Stack>
             </>

@@ -19,8 +19,16 @@ export async function saveLibraryRoot(path: string) {
   return invokeCommand<void>("save_library_root", { path });
 }
 
+export async function saveLibraryRoots(paths: string[]) {
+  return invokeCommand<void>("save_library_roots", { paths });
+}
+
 export async function startInitialScan() {
   return invokeCommand<number>("start_initial_scan");
+}
+
+export async function rescanLibrary() {
+  return invokeCommand<number>("rescan_library");
 }
 
 export async function resetLibraryDatabaseAndRescan() {

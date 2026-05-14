@@ -66,35 +66,44 @@ struct MusicAlbumAggregate {
 
 impl ScannerModule {
 	pub fn scan_library(state: &AppState) -> Result<usize, String> {
-		let root = SettingsModule::library_root_path(state)?
-			.ok_or_else(|| "Library root path is not configured".to_string())?;
-
-		scan_and_replace_library(state, &root)
+		Self::rescan_library(state)
 	}
 
 	pub fn reset_and_scan_library(state: &AppState) -> Result<usize, String> {
-		let root = SettingsModule::library_root_path(state)?
-			.ok_or_else(|| "Library root path is not configured".to_string())?;
+		Self::rescan_library(state)
+	}
+
+	pub fn rescan_library(state: &AppState) -> Result<usize, String> {
+		let roots = SettingsModule::library_root_paths(state)?;
+		if roots.is_empty() {
+			return Err("Library directories are not configured".to_string());
+		}
 
 		state.database.clear_all_data()?;
-		SettingsModule::save_library_root_path(state, &root)?;
+		SettingsModule::save_library_root_paths(state, &roots)?;
 
-		scan_and_replace_library(state, &root)
+		scan_and_replace_libraries(state, &roots)
 	}
 }
 
-fn scan_and_replace_library(state: &AppState, root: &str) -> Result<usize, String> {
+fn scan_and_replace_libraries(state: &AppState, roots: &[String]) -> Result<usize, String> {
 	let app_data_dir = state
 		.database
 		.db_path()
 		.parent()
 		.ok_or_else(|| "App data directory is not available".to_string())?;
-	let scan_result = scan_root(Path::new(root), app_data_dir)?;
+	let mut combined_scan_result = LibraryScanResult::default();
 
-	state.database.replace_media_items(&scan_result.items)?;
+	for root in roots {
+		let scan_result = scan_root(Path::new(root), app_data_dir)?;
+		combined_scan_result.top_level_count += scan_result.top_level_count;
+		combined_scan_result.items.extend(scan_result.items);
+	}
+
+	state.database.replace_media_items(&combined_scan_result.items)?;
 	SettingsModule::set_initial_scan_completed(state)?;
 
-	Ok(scan_result.top_level_count)
+	Ok(combined_scan_result.top_level_count)
 }
 
 fn scan_root(root: &Path, app_data_dir: &Path) -> Result<LibraryScanResult, String> {

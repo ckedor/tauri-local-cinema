@@ -1,3 +1,4 @@
+import { LibraryRootsField } from "@/components/ui/LibraryRootsField";
 import { MediaPosterCard } from "@/features/library/components/MediaPosterCard";
 import { useCatalogFiltersStore } from "@/features/library/store/catalogFilters.store";
 import { formatMediaType } from "@/features/library/utils/media";
@@ -5,17 +6,17 @@ import {
     getInitialSetupStatus,
     listHomeMedia,
     pickLibraryRoot,
-    saveLibraryRoot,
-    startInitialScan
+  rescanLibrary,
+  saveLibraryRoots
 } from "@/services/tauri/commands/library";
 import { HomeMediaItemDto, InitialSetupStatusDto } from "@/types/contracts/library";
+import { appendLibraryRootPath, normalizeLibraryRootPaths } from "@/utils/libraryRoots";
 import {
     Alert,
     Box,
     Button,
     CircularProgress,
     Stack,
-    TextField,
     Typography
 } from "@mui/material";
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
@@ -41,7 +42,7 @@ export function MediaCatalogPage({
   const location = useLocation();
   const [setupStatus, setSetupStatus] = useState<InitialSetupStatusDto | null>(null);
   const [mediaItems, setMediaItems] = useState<HomeMediaItemDto[]>([]);
-  const [selectedPath, setSelectedPath] = useState("");
+  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isScanning, setIsScanning] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -69,7 +70,7 @@ export function MediaCatalogPage({
       ]);
 
       setSetupStatus(nextStatus);
-      setSelectedPath(nextStatus.libraryRootPath ?? "");
+  setSelectedPaths(nextStatus.libraryRootPaths);
       setErrorMessage(null);
       setMediaItems(nextStatus.hasLibraryRoot ? nextItems : []);
       setVisibleCount(INITIAL_VISIBLE_ITEMS);
@@ -85,7 +86,7 @@ export function MediaCatalogPage({
       const path = await pickLibraryRoot();
 
       if (path) {
-        setSelectedPath(path);
+        setSelectedPaths((currentPaths) => appendLibraryRootPath(currentPaths, path));
         setErrorMessage(null);
       }
     } catch (error) {
@@ -93,20 +94,25 @@ export function MediaCatalogPage({
     }
   }
 
+  function handleRemoveFolder(pathIndex: number) {
+    setSelectedPaths((currentPaths) => currentPaths.filter((_, index) => index !== pathIndex));
+  }
+
   async function handleSaveAndScan() {
-    if (!selectedPath.trim()) {
-      setErrorMessage("Escolha uma pasta antes de iniciar o scan.");
+    const nextPaths = normalizeLibraryRootPaths(selectedPaths);
+    if (nextPaths.length === 0) {
+      setErrorMessage("Escolha ao menos uma pasta antes de reescanear tudo.");
       return;
     }
 
     setIsScanning(true);
 
     try {
-      await saveLibraryRoot(selectedPath.trim());
-      await startInitialScan();
+      await saveLibraryRoots(nextPaths);
+      await rescanLibrary();
       await refreshCatalog();
     } catch (error) {
-      setErrorMessage(asMessage(error, "O scan inicial falhou."));
+      setErrorMessage(asMessage(error, "Nao foi possivel reescanear a biblioteca."));
     } finally {
       setIsScanning(false);
     }
@@ -198,25 +204,21 @@ export function MediaCatalogPage({
           <Stack spacing={3}>
             <Typography variant="h5">Configure sua biblioteca</Typography>
 
-            <TextField
-              fullWidth
-              label="Pasta da biblioteca"
-              value={selectedPath}
-              InputProps={{ readOnly: true }}
-              placeholder="Selecione uma pasta"
+            <LibraryRootsField
+              disabled={isScanning}
+              onAddPath={handlePickFolder}
+              onRemovePath={handleRemoveFolder}
+              paths={selectedPaths}
             />
 
             <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-              <Button color="secondary" onClick={handlePickFolder} size="large" variant="outlined">
-                Escolher pasta
-              </Button>
               <Button
-                disabled={!selectedPath.trim() || isScanning}
+                disabled={selectedPaths.length === 0 || isScanning}
                 onClick={handleSaveAndScan}
                 size="large"
                 variant="contained"
               >
-                {isScanning ? "Escaneando biblioteca..." : "Salvar e iniciar scan"}
+                {isScanning ? "Reescaneando biblioteca..." : "Salvar pastas e reescanear tudo"}
               </Button>
             </Stack>
           </Stack>

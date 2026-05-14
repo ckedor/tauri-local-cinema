@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-  [string]$MpvDir = ".\vendor\windows\mpv"
+  [string]$MpvDir = ".\vendor\windows\mpv",
+  [string]$InstallerOutputDir = "."
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,12 @@ function Assert-Command {
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $stageDir = Join-Path $repoRoot "src-tauri\resources\windows\mpv-runtime"
+$resolvedInstallerOutputDir = if ([System.IO.Path]::IsPathRooted($InstallerOutputDir)) {
+  [System.IO.Path]::GetFullPath($InstallerOutputDir)
+}
+else {
+  [System.IO.Path]::GetFullPath((Join-Path $repoRoot $InstallerOutputDir))
+}
 
 Push-Location $repoRoot
 try {
@@ -86,7 +93,28 @@ try {
     throw "Build finished but '$bundleDir' was not found."
   }
 
+  $installerFiles = Get-ChildItem -Path $bundleDir -Filter *.exe -File | Sort-Object LastWriteTime -Descending
+  if ($installerFiles.Count -eq 0) {
+    throw "Build finished but no installer .exe files were found in '$bundleDir'."
+  }
+
+  New-Item -ItemType Directory -Path $resolvedInstallerOutputDir -Force | Out-Null
+  foreach ($installer in $installerFiles) {
+    Copy-Item $installer.FullName -Destination (Join-Path $resolvedInstallerOutputDir $installer.Name) -Force
+  }
+
   Write-Host "Installer output:" -ForegroundColor Green
+  $installerFiles | ForEach-Object {
+    Write-Host "  $($_.FullName)"
+  }
+
+  Write-Host "Installer copied to:" -ForegroundColor Green
+  $installerFiles | ForEach-Object {
+    $copiedInstallerPath = Join-Path $resolvedInstallerOutputDir $_.Name
+    Write-Host "  $copiedInstallerPath"
+  }
+
+  Write-Host "Tauri bundle output:" -ForegroundColor DarkGreen
   Get-ChildItem -Path $bundleDir -File | Sort-Object LastWriteTime -Descending | ForEach-Object {
     Write-Host "  $($_.FullName)"
   }

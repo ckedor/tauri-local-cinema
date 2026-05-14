@@ -1,5 +1,6 @@
 export type InitialSetupStatusDto = {
   libraryRootPath: string | null;
+  libraryRootPaths: string[];
   hasLibraryRoot: boolean;
   mediaCount: number;
 };

@@ -11,3 +11,4 @@ src-tauri/gen/
 *.db-wal
 .DS_Store
 Thumbs.db
+*setup.exe

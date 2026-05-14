@@ -17,6 +17,7 @@ pub fn ping() -> &'static str {
 #[serde(rename_all = "camelCase")]
 pub struct InitialSetupStatusDto {
   pub library_root_path: Option<String>,
+  pub library_root_paths: Vec<String>,
   pub has_library_root: bool,
   pub media_count: usize
 }
@@ -89,12 +90,13 @@ pub struct MusicAlbumDetailDto {
 
 #[tauri::command]
 pub fn get_initial_setup_status(state: State<'_, AppState>) -> Result<InitialSetupStatusDto, String> {
-  let library_root_path = SettingsModule::library_root_path(&state)?;
+  let library_root_paths = SettingsModule::library_root_paths(&state)?;
   let media_count = LibraryModule::list_media(&state)?.len();
 
   Ok(InitialSetupStatusDto {
-    has_library_root: library_root_path.is_some(),
-    library_root_path,
+    library_root_path: library_root_paths.first().cloned(),
+    has_library_root: !library_root_paths.is_empty(),
+    library_root_paths,
     media_count
   })
 }
@@ -112,13 +114,23 @@ pub fn save_library_root(state: State<'_, AppState>, path: String) -> Result<(),
 }
 
 #[tauri::command]
+pub fn save_library_roots(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
+  SettingsModule::save_library_root_paths(&state, &paths)
+}
+
+#[tauri::command]
 pub fn start_initial_scan(state: State<'_, AppState>) -> Result<usize, String> {
-  ScannerModule::scan_library(&state)
+  ScannerModule::rescan_library(&state)
+}
+
+#[tauri::command]
+pub fn rescan_library(state: State<'_, AppState>) -> Result<usize, String> {
+  ScannerModule::rescan_library(&state)
 }
 
 #[tauri::command]
 pub fn reset_library_database_and_rescan(state: State<'_, AppState>) -> Result<usize, String> {
-  ScannerModule::reset_and_scan_library(&state)
+  ScannerModule::rescan_library(&state)
 }
 
 #[tauri::command]

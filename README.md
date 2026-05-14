@@ -166,6 +166,12 @@ The repo is now configured to build a Windows NSIS installer that:
 1. Download and extract a Windows `libmpv` package into `vendor/windows/mpv/`.
 2. Run `npm run build:windows:installer`.
 
+If you prefer Bash, you can run the root wrapper instead:
+
+```bash
+bash ./build-windows-installer.sh
+```
+
 That `vendor/windows/mpv/` folder must contain:
 
 - `mpv.lib`
@@ -191,7 +197,9 @@ If you want to keep the `libmpv` files elsewhere, pass the path explicitly:
 npm run build:windows:installer -- -MpvDir C:\path\to\mpv
 ```
 
-The generated installer is written to `src-tauri/target/release/bundle/nsis/`.
+The build script copies the generated installer `.exe` to the project root.
+
+The original Tauri bundle is still written to `src-tauri/target/release/bundle/nsis/`.
 
 ## Architecture overview
 
