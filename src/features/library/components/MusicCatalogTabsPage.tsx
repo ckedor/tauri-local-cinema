@@ -1,13 +1,14 @@
 import { LibraryRootsField } from "@/components/ui/LibraryRootsField";
 import { SectionCard } from "@/components/ui/SectionCard";
 import { MusicSquareCard } from "@/features/library/components/MusicSquareCard";
-import { useCatalogFiltersStore } from "@/features/library/store/catalogFilters.store";
+import { runLibraryScanAndMarkNewItems } from "@/features/library/services/newItemsSync";
+import { CatalogSortOrder, useCatalogFiltersStore } from "@/features/library/store/catalogFilters.store";
 import {
     getInitialSetupStatus,
     listMusicAlbums,
     pickLibraryRoot,
-  rescanLibrary,
-  saveLibraryRoots
+    rescanLibrary,
+    saveLibraryRoots
 } from "@/services/tauri/commands/library";
 import { HomeMediaItemDto, InitialSetupStatusDto } from "@/types/contracts/library";
 import { appendLibraryRootPath, normalizeLibraryRootPaths } from "@/utils/libraryRoots";
@@ -35,6 +36,7 @@ export function MusicCatalogTabsPage() {
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const searchQuery = useCatalogFiltersStore((state) => state.searchQuery);
   const selectedDecade = useCatalogFiltersStore((state) => state.selectedDecade);
+  const sortOrder = useCatalogFiltersStore((state) => state.sortOrder);
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
   useEffect(() => {
@@ -43,7 +45,7 @@ export function MusicCatalogTabsPage() {
 
   useEffect(() => {
     setVisibleCount(INITIAL_VISIBLE_ITEMS);
-  }, [deferredSearchQuery, selectedDecade]);
+  }, [deferredSearchQuery, selectedDecade, sortOrder]);
 
   async function refreshCatalog() {
     setIsLoading(true);
@@ -94,7 +96,7 @@ export function MusicCatalogTabsPage() {
 
     try {
       await saveLibraryRoots(nextPaths);
-      await rescanLibrary();
+      await runLibraryScanAndMarkNewItems(() => rescanLibrary());
       await refreshCatalog();
     } catch (error) {
       setErrorMessage(asMessage(error, "Nao foi possivel reescanear a biblioteca musical."));
@@ -135,10 +137,10 @@ export function MusicCatalogTabsPage() {
     return Array.from(groups.entries())
       .map(([artistName, artistAlbums]) => ({
         artistName,
-        albums: [...artistAlbums].sort(compareAlbums)
+          albums: [...artistAlbums].sort((left, right) => compareAlbums(left, right, sortOrder))
       }))
       .sort((left, right) => left.artistName.localeCompare(right.artistName, "pt-BR"));
-  }, [albums, deferredSearchQuery, selectedDecade]);
+        }, [albums, deferredSearchQuery, selectedDecade, sortOrder]);
 
   const totalAlbumCount = useMemo(
     () => groupedAlbums.reduce((total, group) => total + group.albums.length, 0),
@@ -236,7 +238,7 @@ export function MusicCatalogTabsPage() {
                 size="large"
                 variant="contained"
               >
-                {isScanning ? "Reescaneando biblioteca..." : "Salvar pastas e reescanear tudo"}
+                {isScanning ? "Reescaneando biblioteca..." : "Salvar pastas e reescanear biblioteca"}
               </Button>
             </Stack>
           </Stack>
@@ -299,15 +301,61 @@ export function MusicCatalogTabsPage() {
   );
 }
 
-function compareAlbums(left: HomeMediaItemDto, right: HomeMediaItemDto) {
-  const leftYear = left.year ?? Number.NEGATIVE_INFINITY;
-  const rightYear = right.year ?? Number.NEGATIVE_INFINITY;
-
-  if (leftYear !== rightYear) {
-    return rightYear - leftYear;
+function compareAlbums(left: HomeMediaItemDto, right: HomeMediaItemDto, sortOrder: CatalogSortOrder) {
+  if (sortOrder === "yearDesc") {
+    return compareOptionalNumbers(left.year, right.year, "desc") || compareAlbumTitles(left, right);
   }
 
+  if (sortOrder === "yearAsc") {
+    return compareOptionalNumbers(left.year, right.year, "asc") || compareAlbumTitles(left, right);
+  }
+
+  if (sortOrder === "ratingDesc") {
+    return compareOptionalNumbers(parseRating(left.imdbRating), parseRating(right.imdbRating), "desc") || compareAlbumTitles(left, right);
+  }
+
+  if (sortOrder === "ratingAsc") {
+    return compareOptionalNumbers(parseRating(left.imdbRating), parseRating(right.imdbRating), "asc") || compareAlbumTitles(left, right);
+  }
+
+  return compareAlbumTitles(left, right);
+}
+
+function compareAlbumTitles(left: HomeMediaItemDto, right: HomeMediaItemDto) {
   return left.title.localeCompare(right.title, "pt-BR");
+}
+
+function compareOptionalNumbers(
+  left: number | null | undefined,
+  right: number | null | undefined,
+  direction: "asc" | "desc"
+) {
+  if (left == null && right == null) {
+    return 0;
+  }
+
+  if (left == null) {
+    return 1;
+  }
+
+  if (right == null) {
+    return -1;
+  }
+
+  if (left !== right) {
+    return direction === "desc" ? right - left : left - right;
+  }
+
+  return 0;
+}
+
+function parseRating(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const parsedValue = Number.parseFloat(value.replace(",", "."));
+  return Number.isFinite(parsedValue) ? parsedValue : null;
 }
 
 function getArtistNameFromAlbumPath(mediaPath: string) {

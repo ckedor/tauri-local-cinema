@@ -1,20 +1,39 @@
 import { SectionCard } from "@/components/ui/SectionCard";
 import { formatMediaType } from "@/features/library/utils/media";
+import { getDisplayTitle } from "@/features/library/utils/titles";
 import { HomeMediaItemDto } from "@/types/contracts/library";
-import { Box, Chip, Stack, Typography } from "@mui/material";
+import { Box, Chip, IconButton, Stack, Tooltip, Typography } from "@mui/material";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useState } from "react";
+import { ReactNode, useState } from "react";
 
 type MediaPosterCardProps = {
   item: HomeMediaItemDto;
   onClick?: () => void;
+  topAction?: {
+    label: string;
+    icon: ReactNode;
+    onClick: () => void;
+    isActive?: boolean;
+    tone?: "accent" | "danger";
+  };
 };
 
-export function MediaPosterCard({ item, onClick }: MediaPosterCardProps) {
+export function MediaPosterCard({ item, onClick, topAction }: MediaPosterCardProps) {
   const [hasPosterError, setHasPosterError] = useState(false);
   const posterUrl = item.posterPath && !hasPosterError ? convertFileSrc(item.posterPath) : null;
+  const displayTitle = getDisplayTitle(item);
   const isInteractive = Boolean(onClick);
   const metaLabel = getCardMetaLabel(item);
+  const actionBackgroundColor = topAction?.tone === "danger"
+    ? "rgba(146, 26, 26, 0.78)"
+    : topAction?.isActive
+      ? "rgba(209, 73, 91, 0.82)"
+      : "rgba(9, 12, 16, 0.62)";
+  const actionHoverColor = topAction?.tone === "danger"
+    ? "rgba(190, 34, 34, 0.9)"
+    : topAction?.isActive
+      ? "rgba(209, 73, 91, 0.94)"
+      : "rgba(9, 12, 16, 0.86)";
 
   return (
     <SectionCard
@@ -60,11 +79,43 @@ export function MediaPosterCard({ item, onClick }: MediaPosterCardProps) {
           p: 1.1
         }}
       >
+        {topAction ? (
+          <Tooltip title={topAction.label}>
+            <IconButton
+              size="small"
+              aria-label={topAction.label}
+              onClick={(event) => {
+                event.stopPropagation();
+                topAction.onClick();
+              }}
+              sx={{
+                position: "absolute",
+                top: 8,
+                right: 8,
+                zIndex: 2,
+                width: 30,
+                height: 30,
+                p: 0.45,
+                backgroundColor: actionBackgroundColor,
+                color: "common.white",
+                "> svg": {
+                  fontSize: 17
+                },
+                ":hover": {
+                  backgroundColor: actionHoverColor
+                }
+              }}
+            >
+              {topAction.icon}
+            </IconButton>
+          </Tooltip>
+        ) : null}
+
         {posterUrl ? (
           <Box
             component="img"
             src={posterUrl}
-            alt={item.title}
+            alt={displayTitle}
             onError={() => setHasPosterError(true)}
             sx={{
               position: "absolute",
@@ -109,7 +160,7 @@ export function MediaPosterCard({ item, onClick }: MediaPosterCardProps) {
               minHeight: 0,
             }}
           >
-            {item.title}
+            {displayTitle}
           </Typography>
 
           <Stack direction="row" justifyContent="space-between" alignItems="flex-end" spacing={1}>
@@ -155,5 +206,11 @@ function getCardMetaLabel(item: HomeMediaItemDto) {
     return item.year ?? "Concerto";
   }
 
-  return item.year ?? "Ano desconhecido";
+  const baseLabel = item.year ?? "Ano desconhecido";
+
+  if (!item.imdbRating) {
+    return baseLabel;
+  }
+
+  return `${baseLabel} • ${item.imdbRating}`;
 }

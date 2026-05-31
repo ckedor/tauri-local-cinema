@@ -1,16 +1,22 @@
 import { LibraryRootsField } from "@/components/ui/LibraryRootsField";
 import { MediaPosterCard } from "@/features/library/components/MediaPosterCard";
-import { useCatalogFiltersStore } from "@/features/library/store/catalogFilters.store";
+import { supportsInterestList } from "@/features/library/services/interestList";
+import { runLibraryScanAndMarkNewItems } from "@/features/library/services/newItemsSync";
+import { CatalogSortOrder, useCatalogFiltersStore } from "@/features/library/store/catalogFilters.store";
+import { useInterestListStore } from "@/features/library/store/interestList.store";
 import { formatMediaType } from "@/features/library/utils/media";
+import { getDisplayTitle, getOriginalTitle } from "@/features/library/utils/titles";
 import {
     getInitialSetupStatus,
     listHomeMedia,
     pickLibraryRoot,
-  rescanLibrary,
-  saveLibraryRoots
+    rescanLibrary,
+    saveLibraryRoots
 } from "@/services/tauri/commands/library";
 import { HomeMediaItemDto, InitialSetupStatusDto } from "@/types/contracts/library";
 import { appendLibraryRootPath, normalizeLibraryRootPaths } from "@/utils/libraryRoots";
+import BookmarkBorderRoundedIcon from "@mui/icons-material/BookmarkBorderRounded";
+import BookmarkRoundedIcon from "@mui/icons-material/BookmarkRounded";
 import {
     Alert,
     Box,
@@ -50,6 +56,11 @@ export function MediaCatalogPage({
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
   const searchQuery = useCatalogFiltersStore((state) => state.searchQuery);
   const selectedDecade = useCatalogFiltersStore((state) => state.selectedDecade);
+  const selectedGenres = useCatalogFiltersStore((state) => state.selectedGenres);
+  const selectedCountries = useCatalogFiltersStore((state) => state.selectedCountries);
+  const sortOrder = useCatalogFiltersStore((state) => state.sortOrder);
+  const interestEntries = useInterestListStore((state) => state.entries);
+  const toggleInterestItem = useInterestListStore((state) => state.toggleItem);
   const deferredSearchQuery = useDeferredValue(searchQuery);
 
   useEffect(() => {
@@ -58,7 +69,7 @@ export function MediaCatalogPage({
 
   useEffect(() => {
     setVisibleCount(INITIAL_VISIBLE_ITEMS);
-  }, [deferredSearchQuery, selectedDecade, mediaTypes?.join("|")]);
+  }, [deferredSearchQuery, selectedDecade, selectedGenres, selectedCountries, sortOrder, mediaTypes?.join("|")]);
 
   async function refreshCatalog() {
     setIsLoading(true);
@@ -101,7 +112,7 @@ export function MediaCatalogPage({
   async function handleSaveAndScan() {
     const nextPaths = normalizeLibraryRootPaths(selectedPaths);
     if (nextPaths.length === 0) {
-      setErrorMessage("Escolha ao menos uma pasta antes de reescanear tudo.");
+		setErrorMessage("Escolha ao menos uma pasta antes de reescanear a biblioteca.");
       return;
     }
 
@@ -109,7 +120,7 @@ export function MediaCatalogPage({
 
     try {
       await saveLibraryRoots(nextPaths);
-      await rescanLibrary();
+      await runLibraryScanAndMarkNewItems(() => rescanLibrary());
       await refreshCatalog();
     } catch (error) {
       setErrorMessage(asMessage(error, "Nao foi possivel reescanear a biblioteca."));
@@ -139,17 +150,35 @@ export function MediaCatalogPage({
           }
         }
 
+        if (selectedGenres.length > 0 && !matchesFacetFilter(item.genre, selectedGenres)) {
+          return false;
+        }
+
+        if (selectedCountries.length > 0 && !matchesFacetFilter(item.country, selectedCountries)) {
+          return false;
+        }
+
         if (!normalizedQuery) {
           return true;
         }
 
         const yearLabel = item.year ? String(item.year) : "";
-        return [item.title, formatMediaType(item.mediaType), yearLabel].some((value) =>
+        return [
+          item.title,
+          getDisplayTitle(item),
+          getOriginalTitle(item) ?? "",
+          formatMediaType(item.mediaType),
+          yearLabel,
+          item.genre ?? "",
+          item.country ?? "",
+          item.director ?? "",
+          item.actors ?? ""
+        ].some((value) =>
           value.toLocaleLowerCase().includes(normalizedQuery)
         );
       })
-      .sort(compareMediaItems);
-  }, [categoryItems, deferredSearchQuery, selectedDecade]);
+        .sort((left, right) => compareMediaItems(left, right, sortOrder));
+      }, [categoryItems, deferredSearchQuery, selectedCountries, selectedDecade, selectedGenres, sortOrder]);
 
   useEffect(() => {
     if (visibleCount >= filteredMediaItems.length) {
@@ -218,7 +247,7 @@ export function MediaCatalogPage({
                 size="large"
                 variant="contained"
               >
-                {isScanning ? "Reescaneando biblioteca..." : "Salvar pastas e reescanear tudo"}
+				{isScanning ? "Reescaneando biblioteca..." : "Salvar pastas e reescanear biblioteca"}
               </Button>
             </Stack>
           </Stack>
@@ -271,6 +300,18 @@ export function MediaCatalogPage({
                       state: { item, backToPath: location.pathname }
                     })
                   }
+                  topAction={supportsInterestList(item)
+                    ? {
+                        label: interestEntries.some((entry) => entry.id === item.id)
+                          ? "Remover de Novos"
+                          : "Marcar como novo",
+                        icon: interestEntries.some((entry) => entry.id === item.id)
+                          ? <BookmarkRoundedIcon fontSize="small" />
+                          : <BookmarkBorderRoundedIcon fontSize="small" />,
+                        isActive: interestEntries.some((entry) => entry.id === item.id),
+                        onClick: () => toggleInterestItem(item)
+                      }
+                    : undefined}
                 />
               </Stack>
             ))}
@@ -289,15 +330,61 @@ export function MediaCatalogPage({
   );
 }
 
-function compareMediaItems(left: HomeMediaItemDto, right: HomeMediaItemDto) {
-  const leftYear = left.year ?? Number.NEGATIVE_INFINITY;
-  const rightYear = right.year ?? Number.NEGATIVE_INFINITY;
-
-  if (leftYear !== rightYear) {
-    return rightYear - leftYear;
+function compareMediaItems(left: HomeMediaItemDto, right: HomeMediaItemDto, sortOrder: CatalogSortOrder) {
+  if (sortOrder === "yearDesc") {
+    return compareOptionalNumbers(left.year, right.year, "desc") || compareTitles(left, right);
   }
 
-  return left.title.localeCompare(right.title, "pt-BR");
+  if (sortOrder === "yearAsc") {
+    return compareOptionalNumbers(left.year, right.year, "asc") || compareTitles(left, right);
+  }
+
+  if (sortOrder === "ratingDesc") {
+    return compareOptionalNumbers(parseRating(left.imdbRating), parseRating(right.imdbRating), "desc") || compareTitles(left, right);
+  }
+
+  if (sortOrder === "ratingAsc") {
+    return compareOptionalNumbers(parseRating(left.imdbRating), parseRating(right.imdbRating), "asc") || compareTitles(left, right);
+  }
+
+  return compareTitles(left, right);
+}
+
+function compareTitles(left: HomeMediaItemDto, right: HomeMediaItemDto) {
+  return getDisplayTitle(left).localeCompare(getDisplayTitle(right), "pt-BR");
+}
+
+function compareOptionalNumbers(
+  left: number | null | undefined,
+  right: number | null | undefined,
+  direction: "asc" | "desc"
+) {
+  if (left == null && right == null) {
+    return 0;
+  }
+
+  if (left == null) {
+    return 1;
+  }
+
+  if (right == null) {
+    return -1;
+  }
+
+  if (left !== right) {
+    return direction === "desc" ? right - left : left - right;
+  }
+
+  return 0;
+}
+
+function parseRating(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  const parsedValue = Number.parseFloat(value.replace(",", "."));
+  return Number.isFinite(parsedValue) ? parsedValue : null;
 }
 
 function asMessage(error: unknown, fallback: string) {
@@ -310,4 +397,17 @@ function asMessage(error: unknown, fallback: string) {
   }
 
   return fallback;
+}
+
+function matchesFacetFilter(rawValue: string | null, selectedValues: string[]) {
+  if (!rawValue) {
+    return false;
+  }
+
+  const values = rawValue
+    .split(",")
+    .map((value) => value.trim().toLocaleLowerCase())
+    .filter(Boolean);
+
+  return selectedValues.some((value) => values.includes(value.toLocaleLowerCase()));
 }

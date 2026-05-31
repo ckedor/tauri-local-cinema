@@ -1,3 +1,4 @@
+import { getDisplayTitle } from "@/features/library/utils/titles";
 import { HomeMediaItemDto, MusicTrackDto } from "@/types/contracts/library";
 
 export type PlayerPlaylistTrack = {
@@ -32,7 +33,7 @@ export const PLAYER_SESSION_STORAGE_KEY = "netcrico.player.session";
 export function toPlayerSession(item: HomeMediaItemDto): PlayerSession {
   return {
     mediaId: item.id,
-    mediaTitle: item.title,
+    mediaTitle: getDisplayTitle(item),
     mediaPath: item.mediaPath,
     posterPath: item.posterPath ?? item.coverPath,
     subtitlePath: item.subtitlePath,

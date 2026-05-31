@@ -4,6 +4,14 @@ pub struct SettingsModule;
 
 const LIBRARY_ROOT_PATHS_KEY: &str = "library_root_paths";
 const LEGACY_LIBRARY_ROOT_PATH_KEY: &str = "library_root_path";
+const TMDB_API_KEY: &str = "tmdb_api_key";
+const OMDB_API_KEY: &str = "omdb_api_key";
+
+#[derive(Debug, Clone, Default)]
+pub struct MetadataApiKeys {
+	pub tmdb_api_key: Option<String>,
+	pub omdb_api_key: Option<String>
+}
 
 impl SettingsModule {
 	pub fn library_root_path(state: &AppState) -> Result<Option<String>, String> {
@@ -47,6 +55,40 @@ impl SettingsModule {
 	pub fn set_initial_scan_completed(state: &AppState) -> Result<(), String> {
 		state.database.set_setting("initial_scan_completed_at", &format!("{}", chrono_like_now()))
 	}
+
+	pub fn metadata_api_keys(state: &AppState) -> Result<MetadataApiKeys, String> {
+		Ok(MetadataApiKeys {
+			tmdb_api_key: read_optional_setting(state, TMDB_API_KEY)?,
+			omdb_api_key: read_optional_setting(state, OMDB_API_KEY)?
+		})
+	}
+
+	pub fn save_metadata_api_keys(
+		state: &AppState,
+		tmdb_api_key: Option<&str>,
+		omdb_api_key: Option<&str>
+	) -> Result<(), String> {
+		write_optional_setting(state, TMDB_API_KEY, tmdb_api_key)?;
+		write_optional_setting(state, OMDB_API_KEY, omdb_api_key)
+	}
+
+	pub fn save_tmdb_api_key(state: &AppState, tmdb_api_key: Option<&str>) -> Result<(), String> {
+		write_optional_setting(state, TMDB_API_KEY, tmdb_api_key)
+	}
+}
+
+fn read_optional_setting(state: &AppState, key: &str) -> Result<Option<String>, String> {
+	Ok(state
+		.database
+		.get_setting(key)?
+		.and_then(|value| {
+			let trimmed = value.trim();
+			(!trimmed.is_empty()).then(|| trimmed.to_string())
+		}))
+}
+
+fn write_optional_setting(state: &AppState, key: &str, value: Option<&str>) -> Result<(), String> {
+	state.database.set_setting(key, value.map(str::trim).filter(|entry| !entry.is_empty()).unwrap_or(""))
 }
 
 fn normalize_library_root_paths(paths: Vec<String>) -> Vec<String> {
