@@ -10,15 +10,15 @@
     "strict": true,
     "forceConsistentCasingInFileNames": true,
     "module": "ESNext",
-    "moduleResolution": "Node",
+    "moduleResolution": "Bundler",
+    "resolvePackageJsonExports": false,
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
     "types": ["node"],
     "jsx": "react-jsx",
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src", "drizzle", "vite.config.ts"],
