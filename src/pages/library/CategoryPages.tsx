@@ -1,19 +1,11 @@
 import { ContinueWatchingRail } from "@/features/library/components/ContinueWatchingRail";
 import { MediaCatalogPage } from "@/features/library/components/MediaCatalogPage";
+import { MovieCatalogTabsPage } from "@/features/library/components/MovieCatalogTabsPage";
 import { MusicCatalogTabsPage } from "@/features/library/components/MusicCatalogTabsPage";
 import { Stack } from "@mui/material";
 
 export function MoviesPage() {
-  return (
-    <Stack spacing={3}>
-      <ContinueWatchingRail mediaType="movie" />
-      <MediaCatalogPage
-        mediaTypes={["movie"]}
-        emptyCategoryTitle="Nenhum filme encontrado"
-        emptyCategoryDescription="Adicione filmes na pasta movies e reescaneie a biblioteca."
-      />
-    </Stack>
-  );
+  return <MovieCatalogTabsPage />;
 }
 
 export function TVShowsPage() {

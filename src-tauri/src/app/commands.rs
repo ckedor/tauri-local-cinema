@@ -1,11 +1,14 @@
 use crate::app::state::AppState;
 use crate::contracts::player::{PlayerRectDto, PlayerSessionDto, PlayerStatusDto};
 use crate::modules::library::LibraryModule;
+use crate::modules::portable_state::PortableStateModule;
 use crate::modules::scanner::ScannerModule;
 use crate::modules::settings::SettingsModule;
 use rfd::FileDialog;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::path::Path;
+use std::process::Command;
 use tauri::{AppHandle, State};
 
 #[tauri::command]
@@ -13,12 +16,56 @@ pub fn ping() -> &'static str {
   "pong"
 }
 
+#[tauri::command]
+pub fn exit_app(app: AppHandle) {
+  app.exit(0);
+}
+
+#[tauri::command]
+pub fn open_media_in_explorer(media_path: String) -> Result<(), String> {
+  let resolved_path = resolve_media_explorer_path(&media_path)?;
+
+  #[cfg(target_os = "windows")]
+  {
+    Command::new("explorer")
+      .arg(&resolved_path)
+      .spawn()
+      .map_err(|error| error.to_string())?;
+  }
+
+  #[cfg(target_os = "macos")]
+  {
+    Command::new("open")
+      .arg(&resolved_path)
+      .spawn()
+      .map_err(|error| error.to_string())?;
+  }
+
+  #[cfg(all(unix, not(target_os = "macos")))]
+  {
+    Command::new("xdg-open")
+      .arg(&resolved_path)
+      .spawn()
+      .map_err(|error| error.to_string())?;
+  }
+
+  Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitialSetupStatusDto {
   pub library_root_path: Option<String>,
+  pub library_root_paths: Vec<String>,
   pub has_library_root: bool,
   pub media_count: usize
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataApiSettingsDto {
+  pub tmdb_api_key: Option<String>,
+  pub omdb_api_key: Option<String>
 }
 
 #[derive(Debug, Serialize)]
@@ -30,12 +77,24 @@ pub struct MediaItemDto {
   pub year: Option<i32>,
   pub poster_path: Option<String>,
   pub cover_path: Option<String>,
+  pub overview: Option<String>,
+  pub english_title: Option<String>,
+  pub original_title: Option<String>,
   pub genre: Option<String>,
   pub director: Option<String>,
   pub actors: Option<String>,
+  pub country: Option<String>,
   pub imdb_rating: Option<String>,
   pub media_path: String,
   pub subtitle_path: Option<String>
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewItemEntryDto {
+  #[serde(flatten)]
+  pub item: MediaItemDto,
+  pub added_at: i64
 }
 
 #[derive(Debug, Serialize)]
@@ -87,14 +146,33 @@ pub struct MusicAlbumDetailDto {
   pub tracks: Vec<MusicTrackDto>
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectorDto {
+  pub id: String,
+  pub name: String,
+  pub image_path: Option<String>,
+  pub movie_count: i64
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovieDirectorDetailDto {
+  pub director_id: String,
+  pub name: String,
+  pub image_path: Option<String>,
+  pub movies: Vec<MediaItemDto>
+}
+
 #[tauri::command]
 pub fn get_initial_setup_status(state: State<'_, AppState>) -> Result<InitialSetupStatusDto, String> {
-  let library_root_path = SettingsModule::library_root_path(&state)?;
+  let library_root_paths = SettingsModule::library_root_paths(&state)?;
   let media_count = LibraryModule::list_media(&state)?.len();
 
   Ok(InitialSetupStatusDto {
-    has_library_root: library_root_path.is_some(),
-    library_root_path,
+    library_root_path: library_root_paths.first().cloned(),
+    has_library_root: !library_root_paths.is_empty(),
+    library_root_paths,
     media_count
   })
 }
@@ -112,13 +190,42 @@ pub fn save_library_root(state: State<'_, AppState>, path: String) -> Result<(),
 }
 
 #[tauri::command]
-pub fn start_initial_scan(state: State<'_, AppState>) -> Result<usize, String> {
-  ScannerModule::scan_library(&state)
+pub fn save_library_roots(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
+  SettingsModule::save_library_root_paths(&state, &paths)
 }
 
 #[tauri::command]
-pub fn reset_library_database_and_rescan(state: State<'_, AppState>) -> Result<usize, String> {
-  ScannerModule::reset_and_scan_library(&state)
+pub fn get_metadata_api_settings(state: State<'_, AppState>) -> Result<MetadataApiSettingsDto, String> {
+  let settings = SettingsModule::metadata_api_keys(&state)?;
+
+  Ok(MetadataApiSettingsDto {
+    tmdb_api_key: settings.tmdb_api_key,
+    omdb_api_key: settings.omdb_api_key
+  })
+}
+
+#[tauri::command]
+pub fn save_metadata_api_settings(
+  state: State<'_, AppState>,
+  tmdb_api_key: Option<String>,
+  omdb_api_key: Option<String>
+) -> Result<(), String> {
+  SettingsModule::save_metadata_api_keys(&state, tmdb_api_key.as_deref(), omdb_api_key.as_deref())
+}
+
+#[tauri::command]
+pub fn start_initial_scan(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
+  ScannerModule::rescan_library(&state, Some(app))
+}
+
+#[tauri::command]
+pub fn rescan_library(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
+  ScannerModule::rescan_library(&state, Some(app))
+}
+
+#[tauri::command]
+pub fn reset_library_database_and_rescan(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
+  ScannerModule::reset_and_scan_library(&state, Some(app))
 }
 
 #[tauri::command]
@@ -126,6 +233,34 @@ pub fn list_home_media(state: State<'_, AppState>) -> Result<Vec<MediaItemDto>, 
   LibraryModule::list_media(&state).map(|items| {
     items.into_iter().map(to_media_item_dto).collect()
   })
+}
+
+#[tauri::command]
+pub fn list_portable_new_items(state: State<'_, AppState>) -> Result<Vec<NewItemEntryDto>, String> {
+  PortableStateModule::list_new_items(&state).map(|items| {
+    items
+      .into_iter()
+      .map(|entry| NewItemEntryDto {
+        item: to_media_item_dto(entry.item),
+        added_at: entry.added_at
+      })
+      .collect()
+  })
+}
+
+#[tauri::command]
+pub fn upsert_portable_new_item(
+  state: State<'_, AppState>,
+  media_path: String,
+  media_type: String,
+  added_at: i64
+) -> Result<(), String> {
+  PortableStateModule::upsert_new_item(&state, &media_path, &media_type, added_at)
+}
+
+#[tauri::command]
+pub fn remove_portable_new_item(state: State<'_, AppState>, media_path: String) -> Result<(), String> {
+  PortableStateModule::remove_new_item(&state, &media_path)
 }
 
 #[tauri::command]
@@ -181,6 +316,30 @@ pub fn list_music_albums(state: State<'_, AppState>) -> Result<Vec<MediaItemDto>
 }
 
 #[tauri::command]
+pub fn list_movie_directors(state: State<'_, AppState>) -> Result<Vec<DirectorDto>, String> {
+  LibraryModule::list_movie_directors(&state).map(|directors| directors.into_iter().map(to_director_dto).collect())
+}
+
+#[tauri::command]
+pub fn get_movie_director_detail(
+  state: State<'_, AppState>,
+  director_id: String
+) -> Result<Option<MovieDirectorDetailDto>, String> {
+  let Some(director) = LibraryModule::get_director(&state, &director_id)? else {
+    return Ok(None);
+  };
+
+  let movies = LibraryModule::list_director_movies(&state, &director_id)?;
+
+  Ok(Some(MovieDirectorDetailDto {
+    director_id: director.id,
+    name: director.name,
+    image_path: director.image_path,
+    movies: movies.into_iter().map(to_media_item_dto).collect()
+  }))
+}
+
+#[tauri::command]
 pub fn get_music_album_detail(
   state: State<'_, AppState>,
   album_id: String
@@ -210,13 +369,47 @@ fn to_media_item_dto(item: crate::infrastructure::db::MediaItemRecord) -> MediaI
     year: item.year,
     poster_path: item.poster_path,
     cover_path: item.cover_path,
+    overview: item.overview,
+    english_title: item.english_title,
+    original_title: item.original_title,
     genre: item.genre,
     director: item.director,
     actors: item.actors,
+    country: item.country,
     imdb_rating: item.imdb_rating,
     media_path: item.media_path,
     subtitle_path: item.subtitle_path
   }
+}
+
+fn to_director_dto(director: crate::infrastructure::db::DirectorListRecord) -> DirectorDto {
+  DirectorDto {
+    id: director.id,
+    name: director.name,
+    image_path: director.image_path,
+    movie_count: director.movie_count
+  }
+}
+
+fn resolve_media_explorer_path(media_path: &str) -> Result<String, String> {
+  let path = Path::new(media_path);
+
+  if path.is_dir() {
+    return Ok(path.to_string_lossy().to_string());
+  }
+
+  if path.is_file() {
+    return path
+      .parent()
+      .map(|parent| parent.to_string_lossy().to_string())
+      .ok_or_else(|| "Nao foi possivel resolver a pasta da midia.".to_string());
+  }
+
+  path
+    .parent()
+    .filter(|parent| parent.exists())
+    .map(|parent| parent.to_string_lossy().to_string())
+    .ok_or_else(|| "Nao foi possivel abrir a pasta da midia.".to_string())
 }
 
 // ---- Embedded player commands -------------------------------------------------

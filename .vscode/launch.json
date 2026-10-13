@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Debug Tauri Backend",
+      "name": "Launch Tauri Backend Only",
       "type": "lldb",
       "request": "launch",
       "cargo": {
@@ -11,11 +11,19 @@
           "--manifest-path=src-tauri/Cargo.toml"
         ],
         "filter": {
-          "name": "app",
+          "name": "tauri-local-cinema",
           "kind": "bin"
         }
       },
       "args": [],
+      "cwd": "${workspaceFolder}",
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "Attach Tauri Backend",
+      "type": "lldb",
+      "request": "attach",
+      "pid": "${command:pickMyProcess}",
       "cwd": "${workspaceFolder}",
       "sourceLanguages": ["rust"]
     },

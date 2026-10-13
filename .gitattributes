@@ -1,0 +1,4 @@
+vendor/windows/mpv/*.dll filter=lfs diff=lfs merge=lfs -text
+vendor/windows/mpv/*.lib filter=lfs diff=lfs merge=lfs -text
+vendor/windows/mpv/*.a filter=lfs diff=lfs merge=lfs -text
+vendor/windows/mpv/*.exp filter=lfs diff=lfs merge=lfs -text

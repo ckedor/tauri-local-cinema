@@ -1,24 +1,39 @@
 use crate::app::state::AppState;
-use crate::infrastructure::db::MediaItemRecord;
-use crate::modules::metadata::{MetadataModule, VideoMetadata};
+use crate::infrastructure::db::{DirectorRecord, MediaDirectorLinkRecord, MediaItemRecord};
+use crate::modules::metadata::{DirectorMetadata, MetadataApiKeys, MetadataModule, VideoMetadata};
 use crate::modules::settings::SettingsModule;
 use lofty::file::TaggedFileExt;
 use lofty::probe::Probe;
 use lofty::tag::ItemKey;
+use serde::Serialize;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsStr;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
 pub struct ScannerModule;
 
+const LIBRARY_SCAN_PROGRESS_EVENT: &str = "library://scan-progress";
+const TMDB_API_KEY_FILE_NAME: &str = "TMDB_API_KEY.txt";
+
 #[derive(Default)]
 struct LibraryScanResult {
 	items: Vec<MediaItemRecord>,
+	directors: Vec<DirectorRecord>,
+	director_links: Vec<MediaDirectorLinkRecord>,
 	top_level_count: usize
+}
+
+#[derive(Default)]
+struct FlatScanResult {
+	items: Vec<MediaItemRecord>,
+	directors: Vec<DirectorRecord>,
+	director_links: Vec<MediaDirectorLinkRecord>
 }
 
 #[derive(Default)]
@@ -64,40 +79,178 @@ struct MusicAlbumAggregate {
 	tracks: Vec<MediaItemRecord>
 }
 
-impl ScannerModule {
-	pub fn scan_library(state: &AppState) -> Result<usize, String> {
-		let root = SettingsModule::library_root_path(state)?
-			.ok_or_else(|| "Library root path is not configured".to_string())?;
+#[derive(Clone, Copy)]
+struct ScanOptions {
+	force_remote_refresh: bool
+}
 
-		scan_and_replace_library(state, &root)
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanProgressPayload {
+	phase: String,
+	message: String,
+	processed: usize,
+	total: usize,
+	percent: u8
+}
+
+struct ScanProgress {
+	app: Option<AppHandle>,
+	processed: usize,
+	total: usize
+}
+
+impl ScanProgress {
+	fn new(app: Option<AppHandle>, total: usize) -> Self {
+		Self {
+			app,
+			processed: 0,
+			total: total.max(1)
+		}
 	}
 
-	pub fn reset_and_scan_library(state: &AppState) -> Result<usize, String> {
-		let root = SettingsModule::library_root_path(state)?
-			.ok_or_else(|| "Library root path is not configured".to_string())?;
+	fn emit_status(&self, phase: &str, message: impl Into<String>) {
+		self.emit(phase, message.into(), self.processed);
+	}
 
-		state.database.clear_all_data()?;
-		SettingsModule::save_library_root_path(state, &root)?;
+	fn advance(&mut self, phase: &str, message: impl Into<String>) {
+		self.processed = self.processed.saturating_add(1).min(self.total);
+		self.emit(phase, message.into(), self.processed);
+	}
 
-		scan_and_replace_library(state, &root)
+	fn finish(&mut self, message: impl Into<String>) {
+		self.processed = self.total;
+		self.emit("done", message.into(), self.total);
+	}
+
+	fn emit(&self, phase: &str, message: String, processed: usize) {
+		let Some(app) = &self.app else {
+			return;
+		};
+
+		let percent = ((processed as f32 / self.total as f32) * 100.0)
+			.round()
+			.clamp(0.0, 100.0) as u8;
+		let _ = app.emit(
+			LIBRARY_SCAN_PROGRESS_EVENT,
+			ScanProgressPayload {
+				phase: phase.to_string(),
+				message,
+				processed,
+				total: self.total,
+				percent
+			}
+		);
 	}
 }
 
-fn scan_and_replace_library(state: &AppState, root: &str) -> Result<usize, String> {
+impl ScannerModule {
+	pub fn scan_library(state: &AppState, app: Option<AppHandle>) -> Result<usize, String> {
+		Self::rescan_library(state, app)
+	}
+
+	pub fn reset_and_scan_library(state: &AppState, app: Option<AppHandle>) -> Result<usize, String> {
+		let roots = SettingsModule::library_root_paths(state)?;
+		let api_keys = SettingsModule::metadata_api_keys(state)?;
+		if roots.is_empty() {
+			return Err("Library directories are not configured".to_string());
+		}
+
+		state.database.clear_all_data()?;
+		SettingsModule::save_library_root_paths(state, &roots)?;
+		SettingsModule::save_metadata_api_keys(state, api_keys.tmdb_api_key.as_deref(), api_keys.omdb_api_key.as_deref())?;
+
+		scan_and_sync_libraries(state, &roots, app, ScanOptions { force_remote_refresh: true })
+	}
+
+	pub fn rescan_library(state: &AppState, app: Option<AppHandle>) -> Result<usize, String> {
+		let roots = SettingsModule::library_root_paths(state)?;
+		if roots.is_empty() {
+			return Err("Library directories are not configured".to_string());
+		}
+
+		SettingsModule::save_library_root_paths(state, &roots)?;
+
+		scan_and_sync_libraries(state, &roots, app, ScanOptions { force_remote_refresh: false })
+	}
+}
+
+fn scan_and_sync_libraries(
+	state: &AppState,
+	roots: &[String],
+	app: Option<AppHandle>,
+	options: ScanOptions
+) -> Result<usize, String> {
 	let app_data_dir = state
 		.database
 		.db_path()
 		.parent()
 		.ok_or_else(|| "App data directory is not available".to_string())?;
-	let scan_result = scan_root(Path::new(root), app_data_dir)?;
+	let mut combined_scan_result = LibraryScanResult::default();
+	let mut progress = ScanProgress::new(app, estimate_scan_work_units(roots).saturating_add(1));
+	progress.emit_status("starting", "Preparando reescaneamento da biblioteca...");
+	if let Some(tmdb_api_key) = find_tmdb_api_key_file(roots) {
+		SettingsModule::save_tmdb_api_key(state, Some(&tmdb_api_key))?;
+		progress.emit_status("starting", format!("TMDb API key carregada de {}.", TMDB_API_KEY_FILE_NAME));
+	}
+	let api_keys = SettingsModule::metadata_api_keys(state)?;
 
-	state.database.replace_media_items(&scan_result.items)?;
+	for root in roots {
+		progress.emit_status("root", format!("Lendo raiz {}", root));
+		let scan_result = scan_root(Path::new(root), app_data_dir, &MetadataApiKeys {
+			tmdb_api_key: api_keys.tmdb_api_key.clone(),
+			omdb_api_key: api_keys.omdb_api_key.clone()
+		}, &mut progress, options)?;
+		combined_scan_result.top_level_count += scan_result.top_level_count;
+		combined_scan_result.items.extend(scan_result.items);
+		combined_scan_result.directors.extend(scan_result.directors);
+		combined_scan_result.director_links.extend(scan_result.director_links);
+	}
+
+	progress.emit_status("sync", "Salvando biblioteca no banco...");
+	state.database.sync_library(
+		&combined_scan_result.items,
+		&combined_scan_result.directors,
+		&combined_scan_result.director_links
+	)?;
+	progress.advance("sync", "Biblioteca salva no banco.");
 	SettingsModule::set_initial_scan_completed(state)?;
+	progress.finish(format!(
+		"Biblioteca sincronizada com {} {}.",
+		combined_scan_result.top_level_count,
+		if combined_scan_result.top_level_count == 1 { "item" } else { "itens" }
+	));
 
-	Ok(scan_result.top_level_count)
+	Ok(combined_scan_result.top_level_count)
 }
 
-fn scan_root(root: &Path, app_data_dir: &Path) -> Result<LibraryScanResult, String> {
+fn find_tmdb_api_key_file(roots: &[String]) -> Option<String> {
+	for root in roots {
+		let candidate = Path::new(root).join(TMDB_API_KEY_FILE_NAME);
+		let Ok(raw) = fs::read_to_string(&candidate) else {
+			continue;
+		};
+		let key = raw
+			.lines()
+			.map(str::trim)
+			.find(|line| !line.is_empty() && !line.starts_with('#'))
+			.map(str::to_string);
+
+		if key.is_some() {
+			return key;
+		}
+	}
+
+	None
+}
+
+fn scan_root(
+	root: &Path,
+	app_data_dir: &Path,
+	api_keys: &MetadataApiKeys,
+	progress: &mut ScanProgress,
+	options: ScanOptions
+) -> Result<LibraryScanResult, String> {
 	if !root.exists() {
 		return Err("Selected library path does not exist".to_string());
 	}
@@ -111,17 +264,19 @@ fn scan_root(root: &Path, app_data_dir: &Path) -> Result<LibraryScanResult, Stri
 		(root.join("standup"), "standup"),
 		(root.join("concerts"), "concert")
 	] {
-		let items = scan_flat_category(&path, media_type, app_data_dir)?;
-		result.top_level_count += items.len();
-		result.items.extend(items);
+		let flat_result = scan_flat_category(&path, media_type, app_data_dir, api_keys, progress, options)?;
+		result.top_level_count += flat_result.items.len();
+		result.items.extend(flat_result.items);
+		result.directors.extend(flat_result.directors);
+		result.director_links.extend(flat_result.director_links);
 	}
 
-	let show_result = scan_show_category(&root.join("shows"), app_data_dir)?;
+	let show_result = scan_show_category(&root.join("shows"), app_data_dir, api_keys, progress, options)?;
 	result.top_level_count += show_result.series_items.len();
 	result.items.extend(show_result.series_items);
 	result.items.extend(show_result.episode_items);
 
-	let music_result = scan_music_category(&root.join("music"), &app_data_dir.join("music-covers"))?;
+	let music_result = scan_music_category(&root.join("music"), &app_data_dir.join("music-covers"), progress)?;
 	result.top_level_count += music_result.artist_items.len();
 	result.items.extend(music_result.artist_items);
 	result.items.extend(music_result.album_items);
@@ -130,12 +285,20 @@ fn scan_root(root: &Path, app_data_dir: &Path) -> Result<LibraryScanResult, Stri
 	Ok(result)
 }
 
-fn scan_flat_category(category_root: &Path, media_type: &str, app_data_dir: &Path) -> Result<Vec<MediaItemRecord>, String> {
+fn scan_flat_category(
+	category_root: &Path,
+	media_type: &str,
+	app_data_dir: &Path,
+	api_keys: &MetadataApiKeys,
+	progress: &mut ScanProgress,
+	options: ScanOptions
+) -> Result<FlatScanResult, String> {
 	if !category_root.exists() {
-		return Ok(Vec::new());
+		return Ok(FlatScanResult::default());
 	}
 
-	let mut items = Vec::new();
+	progress.emit_status("scan", format!("Escaneando {}", category_root.display()));
+	let mut result = FlatScanResult::default();
 
 	for entry in WalkDir::new(category_root).follow_links(true).into_iter().filter_map(Result::ok) {
 		let path = entry.path();
@@ -156,9 +319,13 @@ fn scan_flat_category(category_root: &Path, media_type: &str, app_data_dir: &Pat
 			year,
 			poster_path: find_companion_file(media_directory, &["poster", "cover"], IMAGE_EXTENSIONS),
 			cover_path: find_companion_file(media_directory, &["cover", "poster"], IMAGE_EXTENSIONS),
+			overview: None,
+			english_title: None,
+			original_title: None,
 			genre: None,
 			director: None,
 			actors: None,
+			country: None,
 			imdb_rating: None,
 			imdb_id: None,
 			tmdb_id: None,
@@ -171,7 +338,7 @@ fn scan_flat_category(category_root: &Path, media_type: &str, app_data_dir: &Pat
 			episode_number: None
 		};
 
-		if media_type == "movie" {
+		if matches!(media_type, "movie" | "concert" | "documentary" | "standup") {
 			let metadata = MetadataModule::resolve_video_metadata(
 				media_directory,
 				&item.title,
@@ -179,23 +346,35 @@ fn scan_flat_category(category_root: &Path, media_type: &str, app_data_dir: &Pat
 				media_type,
 				item.poster_path.clone(),
 				item.cover_path.clone(),
+				api_keys,
 				app_data_dir,
-				false
+				true,
+				options.force_remote_refresh
 			);
-			apply_video_metadata(&mut item, metadata);
+			let (directors, director_links) = apply_video_metadata(&mut item, metadata);
+			result.directors.extend(directors);
+			result.director_links.extend(director_links);
 		}
 
-		items.push(item);
+		progress.advance("scan", format!("Processando {}", item.title));
+		result.items.push(item);
 	}
 
-	Ok(items)
+	Ok(result)
 }
 
-fn scan_show_category(shows_root: &Path, app_data_dir: &Path) -> Result<ShowScanResult, String> {
+fn scan_show_category(
+	shows_root: &Path,
+	app_data_dir: &Path,
+	api_keys: &MetadataApiKeys,
+	progress: &mut ScanProgress,
+	options: ScanOptions
+) -> Result<ShowScanResult, String> {
 	if !shows_root.exists() {
 		return Ok(ShowScanResult::default());
 	}
 
+	progress.emit_status("scan", format!("Escaneando {}", shows_root.display()));
 	let mut shows = BTreeMap::<String, ShowAggregate>::new();
 
 	for entry in WalkDir::new(shows_root).follow_links(true).into_iter().filter_map(Result::ok) {
@@ -235,9 +414,13 @@ fn scan_show_category(shows_root: &Path, app_data_dir: &Path) -> Result<ShowScan
 			year,
 			poster_path: None,
 			cover_path: None,
+			overview: None,
+			english_title: None,
+			original_title: None,
 			genre: None,
 			director: None,
 			actors: None,
+			country: None,
 			imdb_rating: None,
 			imdb_id: None,
 			tmdb_id: None,
@@ -291,9 +474,13 @@ fn scan_show_category(shows_root: &Path, app_data_dir: &Path) -> Result<ShowScan
 			year: show.year,
 			poster_path: show.poster_path,
 			cover_path: show.cover_path,
+			overview: None,
+			english_title: None,
+			original_title: None,
 			genre: None,
 			director: None,
 			actors: None,
+			country: None,
 			imdb_rating: None,
 			imdb_id: None,
 			tmdb_id: None,
@@ -311,10 +498,13 @@ fn scan_show_category(shows_root: &Path, app_data_dir: &Path) -> Result<ShowScan
 			"show",
 			series_item.poster_path.clone(),
 			series_item.cover_path.clone(),
+			api_keys,
 			app_data_dir,
-			false
+			true,
+			options.force_remote_refresh
 		);
-		apply_video_metadata(&mut series_item, metadata);
+		let _ = apply_video_metadata(&mut series_item, metadata);
+		progress.advance("scan", format!("Processando serie {}", series_item.title));
 		result.series_items.push(series_item);
 
 		result.episode_items.extend(show.episodes);
@@ -323,33 +513,137 @@ fn scan_show_category(shows_root: &Path, app_data_dir: &Path) -> Result<ShowScan
 	Ok(result)
 }
 
-fn apply_video_metadata(item: &mut MediaItemRecord, metadata: VideoMetadata) {
-	if metadata.year.is_some() {
-		item.year = metadata.year;
+fn apply_video_metadata(item: &mut MediaItemRecord, metadata: VideoMetadata) -> (Vec<DirectorRecord>, Vec<MediaDirectorLinkRecord>) {
+	let VideoMetadata {
+		year,
+		poster_path,
+		cover_path,
+		overview,
+		english_title,
+		original_title,
+		genre,
+		director,
+		directors,
+		actors,
+		country,
+		imdb_rating,
+		imdb_id,
+		tmdb_id
+	} = metadata;
+
+	if year.is_some() {
+		item.year = year;
 	}
 
-	if metadata.poster_path.is_some() {
-		item.poster_path = metadata.poster_path;
+	if poster_path.is_some() {
+		item.poster_path = poster_path;
 	}
 
-	if metadata.cover_path.is_some() {
-		item.cover_path = metadata.cover_path;
+	if cover_path.is_some() {
+		item.cover_path = cover_path;
 	}
 
-	item.genre = metadata.genre;
-	item.director = metadata.director;
-	item.actors = metadata.actors;
-	item.imdb_rating = metadata.imdb_rating;
-	item.imdb_id = metadata.imdb_id;
-	item.tmdb_id = metadata.tmdb_id;
+	item.english_title = english_title;
+	item.original_title = original_title;
+	item.overview = overview;
+
+	item.genre = genre;
+	item.director = director.clone();
+	item.actors = actors;
+	item.country = country;
+	item.imdb_rating = imdb_rating;
+	item.imdb_id = imdb_id;
+	item.tmdb_id = tmdb_id;
+
+	collect_director_scan_data(item, director.as_deref(), &directors)
 }
 
-fn scan_music_category(music_root: &Path, cover_cache_root: &Path) -> Result<MusicScanResult, String> {
+fn collect_director_scan_data(
+	item: &MediaItemRecord,
+	director_text: Option<&str>,
+	directors: &[DirectorMetadata]
+) -> (Vec<DirectorRecord>, Vec<MediaDirectorLinkRecord>) {
+	if item.media_type != "movie" {
+		return (Vec::new(), Vec::new());
+	}
+
+	let director_candidates = if directors.is_empty() {
+		director_text.map(parse_director_names).unwrap_or_default()
+	} else {
+		directors.to_vec()
+	};
+
+	let mut seen_director_ids = BTreeSet::new();
+	let mut directors = Vec::new();
+	let mut director_links = Vec::new();
+
+	for (index, director) in director_candidates.into_iter().enumerate() {
+		let Some(director_id) = build_director_id(&director.name) else {
+			continue;
+		};
+
+		if !seen_director_ids.insert(director_id.clone()) {
+			continue;
+		}
+
+		directors.push(DirectorRecord {
+			id: director_id.clone(),
+			name: director.name,
+			tmdb_person_id: director.tmdb_person_id,
+			image_path: director.image_path,
+			biography: None
+		});
+		director_links.push(MediaDirectorLinkRecord {
+			media_item_id: item.id.clone(),
+			director_id,
+			ordinal: index as i32
+		});
+	}
+
+	(directors, director_links)
+}
+
+fn parse_director_names(raw: &str) -> Vec<DirectorMetadata> {
+	raw
+		.split(',')
+		.map(str::trim)
+		.filter(|name| !name.is_empty())
+		.map(|name| DirectorMetadata {
+			name: name.to_string(),
+			tmdb_person_id: None,
+			image_path: None
+		})
+		.collect()
+}
+
+fn build_director_id(name: &str) -> Option<String> {
+	let mut normalized = String::with_capacity(name.len());
+
+	for character in name.chars() {
+		if character.is_alphanumeric() {
+			normalized.extend(character.to_lowercase());
+		} else {
+			normalized.push('-');
+		}
+	}
+
+	let normalized = normalized
+		.split('-')
+		.filter(|segment| !segment.is_empty())
+		.collect::<Vec<_>>()
+		.join("-");
+
+	(!normalized.is_empty()).then(|| format!("director:{}", normalized))
+}
+
+fn scan_music_category(music_root: &Path, cover_cache_root: &Path, progress: &mut ScanProgress) -> Result<MusicScanResult, String> {
 	if !music_root.exists() {
 		return Ok(MusicScanResult::default());
 	}
 
+	progress.emit_status("scan", format!("Escaneando {}", music_root.display()));
 	let mut artists = BTreeMap::<String, MusicArtistAggregate>::new();
+	let mut scanned_track_count = 0usize;
 
 	for entry in WalkDir::new(music_root).follow_links(true).into_iter().filter_map(Result::ok) {
 		let path = entry.path();
@@ -403,9 +697,13 @@ fn scan_music_category(music_root: &Path, cover_cache_root: &Path) -> Result<Mus
 			year,
 			poster_path: cover_path.clone(),
 			cover_path: cover_path.clone(),
+			overview: None,
+			english_title: None,
+			original_title: None,
 			genre: None,
 			director: None,
 			actors: None,
+			country: None,
 			imdb_rating: None,
 			imdb_id: None,
 			tmdb_id: None,
@@ -449,11 +747,19 @@ fn scan_music_category(music_root: &Path, cover_cache_root: &Path) -> Result<Mus
 		}
 
 		album_entry.tracks.push(track_record);
+		scanned_track_count += 1;
+
+		if scanned_track_count == 1 || scanned_track_count % 12 == 0 {
+			if let Some(current_track) = album_entry.tracks.last() {
+				progress.emit_status("scan", format!("Indexando musica {}", current_track.title));
+			}
+		}
 	}
 
 	let mut result = MusicScanResult::default();
 
 	for (_, artist) in artists {
+		progress.emit_status("scan", format!("Organizando artista {}", artist.title));
 		let mut albums = artist.albums.into_values().collect::<Vec<_>>();
 		albums.sort_by(|left, right| {
 			left
@@ -470,9 +776,13 @@ fn scan_music_category(music_root: &Path, cover_cache_root: &Path) -> Result<Mus
 			year: None,
 			poster_path: artist.poster_path,
 			cover_path: None,
+			overview: None,
+			english_title: None,
+			original_title: None,
 			genre: None,
 			director: None,
 			actors: None,
+			country: None,
 			imdb_rating: None,
 			imdb_id: None,
 			tmdb_id: None,
@@ -500,9 +810,13 @@ fn scan_music_category(music_root: &Path, cover_cache_root: &Path) -> Result<Mus
 				year: album.year,
 				poster_path: album.poster_path.clone(),
 				cover_path: album.poster_path.clone(),
+				overview: None,
+				english_title: None,
+				original_title: None,
 				genre: None,
 				director: None,
 				actors: None,
+				country: None,
 				imdb_rating: None,
 				imdb_id: None,
 				tmdb_id: None,
@@ -537,6 +851,63 @@ fn extract_embedded_cover(audio_path: &Path, cover_cache_root: &Path, album_id: 
 	fs::write(&cover_path, picture.data()).ok()?;
 
 	Some(cover_path.to_string_lossy().to_string())
+}
+
+fn estimate_scan_work_units(roots: &[String]) -> usize {
+	roots.iter().map(|root| estimate_root_work_units(Path::new(root))).sum()
+}
+
+fn estimate_root_work_units(root: &Path) -> usize {
+	let flat_video_total = [
+		root.join("movies"),
+		root.join("documentary"),
+		root.join("documentaries"),
+		root.join("standup"),
+		root.join("concerts")
+	]
+	.into_iter()
+	.map(|path| count_video_files(&path))
+	.sum::<usize>();
+	let show_total = count_show_series(&root.join("shows"));
+
+	flat_video_total + show_total
+}
+
+fn count_video_files(root: &Path) -> usize {
+	if !root.exists() {
+		return 0;
+	}
+
+	WalkDir::new(root)
+		.follow_links(true)
+		.into_iter()
+		.filter_map(Result::ok)
+		.filter(|entry| entry.file_type().is_file() && is_video_file(entry.path()))
+		.count()
+}
+
+fn count_show_series(root: &Path) -> usize {
+	if !root.exists() {
+		return 0;
+	}
+
+	let mut series = BTreeSet::new();
+
+	for entry in WalkDir::new(root).follow_links(true).into_iter().filter_map(Result::ok) {
+		let path = entry.path();
+		if !entry.file_type().is_file() || !is_video_file(path) {
+			continue;
+		}
+
+		let relative = path.strip_prefix(root).unwrap_or(path);
+		let Some(series_folder) = relative.components().next().and_then(|component| component.as_os_str().to_str()) else {
+			continue;
+		};
+
+		series.insert(series_folder.to_string());
+	}
+
+	series.len()
 }
 
 fn find_cached_cover_path(cover_cache_root: &Path, album_id: &str) -> Option<String> {

@@ -1,52 +1,59 @@
 import { MusicArtistDetailView } from "@/features/library/components/MusicArtistDetailView";
+import { supportsInterestList } from "@/features/library/services/interestList";
+import { useInterestListStore } from "@/features/library/store/interestList.store";
 import {
-  formatMediaType,
-  getMediaFormat,
-  getPlaceholderDescription
+    formatMediaType,
+    getMediaFormat,
+    getPlaceholderDescription
 } from "@/features/library/utils/media";
+import { getDisplayTitle, getOriginalTitle } from "@/features/library/utils/titles";
 import { VolumeControl } from "@/features/player/components/VolumeControl";
 import {
-  ContinueWatchingEntry,
-  toPlayerSessionFromContinueWatching
+    ContinueWatchingEntry,
+    toPlayerSessionFromContinueWatching
 } from "@/features/player/services/continueWatching";
 import { launchPlayer, launchPlayerSession } from "@/features/player/services/launchPlayer";
 import {
-  clampPlaybackVolume,
-  persistPlaybackVolumeState,
-  PlaybackVolumeState,
-  readStoredPlaybackVolumeState
+    clampPlaybackVolume,
+    persistPlaybackVolumeState,
+    PlaybackVolumeState,
+    readStoredPlaybackVolumeState
 } from "@/features/player/services/playbackVolume";
 import { useContinueWatchingStore } from "@/features/player/store/continueWatching.store";
 import {
-  getMediaItem,
-  getMusicAlbumDetail,
-  getMusicArtistDetail,
-  getShowDetail
+    getMediaItem,
+    getMusicAlbumDetail,
+    getMusicArtistDetail,
+    getShowDetail,
+    openMediaInExplorer
 } from "@/services/tauri/commands/library";
 import {
-  HomeMediaItemDto,
-  MusicAlbumDetailDto,
-  MusicArtistDetailDto,
-  MusicTrackDto,
-  ShowDetailDto,
-  ShowEpisodeDto
+    HomeMediaItemDto,
+    MusicAlbumDetailDto,
+    MusicArtistDetailDto,
+    MusicTrackDto,
+    ShowDetailDto,
+    ShowEpisodeDto
 } from "@/types/contracts/library";
+import BookmarkBorderRoundedIcon from "@mui/icons-material/BookmarkBorderRounded";
+import BookmarkRoundedIcon from "@mui/icons-material/BookmarkRounded";
+import FolderOpenRoundedIcon from "@mui/icons-material/FolderOpenRounded";
 import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
 import {
-  Alert,
-  Box,
-  Button,
-  Chip,
-  CircularProgress,
-  Divider,
-  IconButton,
-  LinearProgress,
-  Slider,
-  Stack,
-  Tab,
-  Tabs,
-  Typography
+    Alert,
+    Box,
+    Button,
+    Chip,
+    CircularProgress,
+    Divider,
+    IconButton,
+    LinearProgress,
+    Slider,
+    Stack,
+    Tab,
+    Tabs,
+    Typography
 } from "@mui/material";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState, type SyntheticEvent } from "react";
@@ -86,6 +93,8 @@ export function LibraryDetailPage() {
   const [inlineAlbumPlaybackError, setInlineAlbumPlaybackError] = useState<string | null>(null);
   const [inlineAlbumVolumeState, setInlineAlbumVolumeState] = useState<PlaybackVolumeState>(() => readStoredPlaybackVolumeState());
   const continueWatchingEntries = useContinueWatchingStore((state) => state.entries);
+  const interestEntries = useInterestListStore((state) => state.entries);
+  const toggleInterestItem = useInterestListStore((state) => state.toggleItem);
 
   useEffect(() => {
     if (!decodedMediaId || !navigationState?.item) {
@@ -381,7 +390,13 @@ export function LibraryDetailPage() {
       (entry) => entry.mediaType === "show_episode" && entry.entryId === item.id
     ) ?? null;
   }, [continueWatchingEntries, item?.id, item?.mediaType]);
-  const detailDescription = useMemo(() => (item ? getPlaceholderDescription(item) : ""), [item]);
+  const detailDescription = useMemo(() => {
+    if (!item) {
+      return "";
+    }
+
+    return item.overview?.trim() || getPlaceholderDescription(item);
+  }, [item]);
   const activeAlbumTrack = useMemo(
     () => albumTracks.find((track) => track.id === activeAlbumTrackId) ?? null,
     [activeAlbumTrackId, albumTracks]
@@ -545,6 +560,8 @@ export function LibraryDetailPage() {
   const isShow = item.mediaType === "show";
   const isMusicArtist = item.mediaType === "music_artist";
   const isMusicAlbum = item.mediaType === "music_album";
+  const supportsInterest = supportsInterestList(item);
+  const isInterested = supportsInterest && interestEntries.some((entry) => entry.id === item.id);
 
   if (isMusicArtist) {
     return (
@@ -711,7 +728,7 @@ export function LibraryDetailPage() {
             >
               <Chip label={formatMediaType(item.mediaType)} color="secondary" size="small" />
               {!isMusicArtist && !isMusicAlbum && item.imdbRating ? (
-                <Chip label={`IMDb ${item.imdbRating}`} variant="outlined" size="small" />
+                <Chip label={`Nota ${item.imdbRating}`} variant="outlined" size="small" />
               ) : null}
               {isShow ? <Chip label={seasonSummaryLabel} variant="outlined" size="small" /> : null}
               {isMusicArtist ? <Chip label={`${artistAlbums.length} albuns`} variant="outlined" size="small" /> : null}
@@ -733,8 +750,20 @@ export function LibraryDetailPage() {
                 lineHeight: isShow ? 1.03 : undefined
               }}
             >
-              {item.title}
+              {getDisplayTitle(item)}
             </Typography>
+
+            {!isMusicArtist && !isMusicAlbum && getOriginalTitle(item) ? (
+              <Typography
+                color="text.secondary"
+                sx={{
+                  fontSize: { xs: "0.95rem", md: "1rem" },
+                  letterSpacing: 0.3
+                }}
+              >
+                Titulo original: {getOriginalTitle(item)}
+              </Typography>
+            ) : null}
 
             {isShow ? (
               <Typography
@@ -774,14 +803,43 @@ export function LibraryDetailPage() {
           <Divider flexItem sx={{ borderColor: "rgba(255, 255, 255, 0.08)" }} />
 
           <Stack spacing={isShow ? 1.1 : 1.5}>
-            <MetadataRow label={getPrimaryPathLabel(item.mediaType)} value={item.mediaPath} />
+            <MetadataRow
+              label={getPrimaryPathLabel(item.mediaType)}
+              value={item.mediaPath}
+              action={!isMusicArtist && !isMusicAlbum
+                ? {
+                    label: "Abrir pasta no Explorer",
+                    onClick: () => {
+                      void openMediaInExplorer(item.mediaPath).catch((error) => {
+                        setErrorMessage(asMessage(error, "Nao foi possivel abrir a pasta da midia."));
+                      });
+                    }
+                  }
+                : undefined}
+            />
             {!isShow ? (
               <MetadataRow label={getSecondaryMetaLabel(item.mediaType)} value={getSecondaryMetaValue(item, totalEpisodeCount, artistAlbums.length, albumTracks.length)} />
             ) : null}
             {!isMusicArtist && !isMusicAlbum && item.genre ? <MetadataRow label="Genero" value={item.genre} /> : null}
             {!isMusicArtist && !isMusicAlbum && item.director ? <MetadataRow label="Direcao" value={item.director} /> : null}
             {!isMusicArtist && !isMusicAlbum && item.actors ? <MetadataRow label="Atores" value={item.actors} /> : null}
+            {!isMusicArtist && !isMusicAlbum && item.country ? <MetadataRow label="Nacionalidade" value={item.country} /> : null}
           </Stack>
+
+          {isShow && supportsInterest ? (
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+              <Button
+                color={isInterested ? "secondary" : "inherit"}
+                size="large"
+                startIcon={isInterested ? <BookmarkRoundedIcon /> : <BookmarkBorderRoundedIcon />}
+                sx={{ width: { xs: "100%", sm: "fit-content" } }}
+                variant={isInterested ? "contained" : "outlined"}
+                onClick={() => toggleInterestItem(item)}
+              >
+                {isInterested ? "Remover de Novos" : "Marcar como novo"}
+              </Button>
+            </Stack>
+          ) : null}
 
           {isShow ? (
             <Stack spacing={2.5}>
@@ -981,6 +1039,18 @@ export function LibraryDetailPage() {
                 Reproduzir
               </Button>
 
+              {supportsInterest ? (
+                <Button
+                  color={isInterested ? "secondary" : "inherit"}
+                  size="large"
+                  startIcon={isInterested ? <BookmarkRoundedIcon /> : <BookmarkBorderRoundedIcon />}
+                  variant={isInterested ? "contained" : "outlined"}
+                  onClick={() => toggleInterestItem(item)}
+                >
+                  {isInterested ? "Remover de Novos" : "Marcar como novo"}
+                </Button>
+              ) : null}
+
               <Button size="large" variant="outlined" onClick={() => navigate(backToPath)}>
                 Voltar para a lista
               </Button>
@@ -1040,14 +1110,25 @@ export function LibraryDetailPage() {
 type MetadataRowProps = {
   label: string;
   value: string;
+  action?: {
+    label: string;
+    onClick: () => void;
+  };
 };
 
-function MetadataRow({ label, value }: MetadataRowProps) {
+function MetadataRow({ label, value, action }: MetadataRowProps) {
   return (
     <Stack spacing={0.4}>
-      <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase", letterSpacing: 1.4 }}>
-        {label}
-      </Typography>
+      <Stack direction="row" alignItems="center" spacing={0.5}>
+        <Typography variant="caption" sx={{ color: "text.secondary", textTransform: "uppercase", letterSpacing: 1.4 }}>
+          {label}
+        </Typography>
+        {action ? (
+          <IconButton aria-label={action.label} onClick={action.onClick} size="small" sx={{ color: "text.secondary", ml: -0.5 }}>
+            <FolderOpenRoundedIcon fontSize="inherit" />
+          </IconButton>
+        ) : null}
+      </Stack>
       <Typography sx={{ wordBreak: "break-word", fontSize: "0.95rem", lineHeight: 1.45 }}>{value}</Typography>
     </Stack>
   );
