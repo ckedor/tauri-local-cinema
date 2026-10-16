@@ -1,5 +1,6 @@
 import { LibraryRootsField } from "@/components/ui/LibraryRootsField";
 import { SectionCard } from "@/components/ui/SectionCard";
+import { SubtitleSettingsCard } from "@/features/library/components/SubtitleSettingsCard";
 import { runLibraryScanAndMarkNewItems } from "@/features/library/services/newItemsSync";
 import {
   getInitialSetupStatus,
@@ -19,7 +20,7 @@ import { useEffect, useState } from "react";
 export function SettingsPage() {
   const [libraryRootPaths, setLibraryRootPaths] = useState<string[]>([]);
   const [tmdbApiKey, setTmdbApiKey] = useState("");
-  const [omdbApiKey, setOmdbApiKey] = useState("");
+  const [anthropicApiKey, setAnthropicApiKey] = useState("");
   const [scanProgress, setScanProgress] = useState<LibraryScanProgressEvent | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRescanning, setIsRescanning] = useState(false);
@@ -62,7 +63,7 @@ export function SettingsPage() {
       const [status, apiSettings] = await Promise.all([getInitialSetupStatus(), getMetadataApiSettings()]);
       setLibraryRootPaths(status.libraryRootPaths);
       setTmdbApiKey(apiSettings.tmdbApiKey ?? "");
-      setOmdbApiKey(apiSettings.omdbApiKey ?? "");
+      setAnthropicApiKey(apiSettings.anthropicApiKey ?? "");
       setErrorMessage(null);
     } catch (error) {
       setErrorMessage(asMessage(error, "Nao foi possivel carregar as configuracoes."));
@@ -87,6 +88,18 @@ export function SettingsPage() {
   function handleRemoveFolder(pathIndex: number) {
     setLibraryRootPaths((currentPaths) => currentPaths.filter((_, index) => index !== pathIndex));
     setMessage(null);
+  }
+
+  async function handleSaveKeys() {
+    setMessage(null);
+    setErrorMessage(null);
+
+    try {
+      await saveMetadataApiSettings(tmdbApiKey, anthropicApiKey);
+      setMessage("Chaves salvas.");
+    } catch (error) {
+      setErrorMessage(asMessage(error, "Nao foi possivel salvar as chaves."));
+    }
   }
 
   async function handleSaveAndRescan() {
@@ -117,7 +130,7 @@ export function SettingsPage() {
 
     try {
       await saveLibraryRoots(nextPaths);
-      await saveMetadataApiSettings(tmdbApiKey, omdbApiKey);
+      await saveMetadataApiSettings(tmdbApiKey, anthropicApiKey);
       const total = await runScan();
       setLibraryRootPaths(nextPaths);
       setMessage(
@@ -177,17 +190,22 @@ export function SettingsPage() {
                 />
                 <TextField
                   disabled={isRescanning}
-                  helperText="Opcional. Pode complementar alguns campos quando o TMDb nao resolver bem."
-                  label="OMDb API Key"
-                  onChange={(event) => setOmdbApiKey(event.target.value)}
+                  helperText="Opcional. Usada pelo botao + para identificar pastas novas (titulo, TMDb, nova temporada)."
+                  label="Anthropic API Key"
+                  onChange={(event) => setAnthropicApiKey(event.target.value)}
                   type="password"
-                  value={omdbApiKey}
+                  value={anthropicApiKey}
                 />
+                <Button disabled={isRescanning} onClick={() => void handleSaveKeys()} sx={{ alignSelf: "flex-start" }} variant="contained">
+                  Salvar chaves
+                </Button>
                 <Alert severity="info">
                   O reescaneamento mantem o que continua na base, adiciona titulos novos, remove o que sumiu do disco e usa essas chaves salvas no banco para metadata e poster.
                 </Alert>
               </Stack>
             </SectionCard>
+
+            <SubtitleSettingsCard />
 
             <SectionCard>
               <Stack spacing={2.5}>

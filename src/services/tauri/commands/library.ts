@@ -2,13 +2,22 @@ import { invokeCommand } from "@/services/tauri/client/invoke";
 import {
   DirectorSummaryDto,
     HomeMediaItemDto,
+    ImportIdentityDto,
+    ImportPlanDto,
     InitialSetupStatusDto,
     MetadataApiSettingsDto,
   MovieDirectorDetailDto,
     MusicAlbumDetailDto,
     MusicArtistDetailDto,
     NewItemEntryDto,
-    ShowDetailDto
+    RefreshPlanDto,
+    RefreshResultDto,
+    RefreshSelectionDto,
+    SeasonSubtitlesDto,
+    ShowDetailDto,
+    SubtitleDownloadResultDto,
+    SubtitleSettingsDto,
+    SubtitleSyncSummaryDto
 } from "@/types/contracts/library";
 
 export async function getInitialSetupStatus() {
@@ -31,11 +40,27 @@ export async function getMetadataApiSettings() {
   return invokeCommand<MetadataApiSettingsDto>("get_metadata_api_settings");
 }
 
-export async function saveMetadataApiSettings(tmdbApiKey: string, omdbApiKey: string) {
+export async function saveMetadataApiSettings(tmdbApiKey: string, anthropicApiKey: string) {
   return invokeCommand<void>("save_metadata_api_settings", {
     tmdbApiKey,
-    omdbApiKey
+    anthropicApiKey
   });
+}
+
+export async function pickImportFiles() {
+  return invokeCommand<string[]>("pick_import_files");
+}
+
+export async function importPreview(sourcePaths: string[], category: string | null) {
+  return invokeCommand<ImportPlanDto>("import_preview", { sourcePaths, category });
+}
+
+export async function importRebuildPlan(identity: ImportIdentityDto) {
+  return invokeCommand<ImportPlanDto>("import_rebuild_plan", { identity });
+}
+
+export async function importApply(identity: ImportIdentityDto) {
+  return invokeCommand<string>("import_apply", { identity });
 }
 
 export async function startInitialScan() {
@@ -100,4 +125,37 @@ export async function getMovieDirectorDetail(directorId: string) {
 
 export async function getMusicAlbumDetail(albumId: string) {
   return invokeCommand<MusicAlbumDetailDto>("get_music_album_detail", { albumId });
+}
+export async function refreshPreview(mediaId: string, tmdbId: string | null) {
+  return invokeCommand<RefreshPlanDto>("refresh_preview", { mediaId, tmdbId });
+}
+
+export async function refreshApply(selection: RefreshSelectionDto) {
+  return invokeCommand<RefreshResultDto>("refresh_apply", { selection });
+}
+
+/** `seasonNumber` null searches every season. */
+export async function searchSeasonSubtitles(mediaId: string, seasonNumber: number | null) {
+  return invokeCommand<SeasonSubtitlesDto>("subtitles_search", { mediaId, seasonNumber });
+}
+
+export async function downloadSubtitles(mediaId: string, downloads: { fileId: number; targetPath: string; episodeId: string; embeddedTrack: number | null }[]) {
+  return invokeCommand<SubtitleDownloadResultDto>("subtitles_download", { mediaId, downloads });
+}
+
+/** Aligns the subtitle files already downloaded; `seasonNumber` null covers every season. */
+export async function syncExistingSubtitles(mediaId: string, seasonNumber: number | null) {
+  return invokeCommand<SubtitleSyncSummaryDto>("subtitles_sync_existing", { mediaId, seasonNumber });
+}
+
+export async function fetchEpisodeSubtitles(mediaId: string, episodeId: string) {
+  return invokeCommand<SubtitleDownloadResultDto>("subtitles_fetch_episode", { mediaId, episodeId });
+}
+
+export async function getSubtitleSettings() {
+  return invokeCommand<SubtitleSettingsDto>("get_subtitle_settings");
+}
+
+export async function saveSubtitleSettings(settings: SubtitleSettingsDto) {
+  return invokeCommand<void>("save_subtitle_settings", { settings });
 }

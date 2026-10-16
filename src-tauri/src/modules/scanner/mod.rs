@@ -12,7 +12,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsStr;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
@@ -158,7 +158,7 @@ impl ScannerModule {
 
 		state.database.clear_all_data()?;
 		SettingsModule::save_library_root_paths(state, &roots)?;
-		SettingsModule::save_metadata_api_keys(state, api_keys.tmdb_api_key.as_deref(), api_keys.omdb_api_key.as_deref())?;
+		SettingsModule::save_metadata_api_keys(state, api_keys.tmdb_api_key.as_deref(), api_keys.anthropic_api_key.as_deref())?;
 
 		scan_and_sync_libraries(state, &roots, app, ScanOptions { force_remote_refresh: true })
 	}
@@ -172,6 +172,38 @@ impl ScannerModule {
 		SettingsModule::save_library_root_paths(state, &roots)?;
 
 		scan_and_sync_libraries(state, &roots, app, ScanOptions { force_remote_refresh: false })
+	}
+
+	/// Indexes one item folder (a movie folder or a whole series folder) and
+	/// upserts it without touching the rest of the library, so adding a title
+	/// doesn't walk the whole drive. `force_remote_refresh` re-fetches TMDb
+	/// metadata and rewrites the item's local metadata file.
+	pub fn index_item(
+		state: &AppState,
+		app: Option<AppHandle>,
+		category_root: &Path,
+		item_root: &Path,
+		media_type: &str,
+		force_remote_refresh: bool
+	) -> Result<(), String> {
+		let app_data_dir = state
+			.database
+			.db_path()
+			.parent()
+			.ok_or_else(|| "App data directory is not available".to_string())?;
+		let api_keys = SettingsModule::metadata_api_keys(state)?;
+		let api_keys = MetadataApiKeys { tmdb_api_key: api_keys.tmdb_api_key };
+		let mut progress = ScanProgress::new(app, 1);
+		let options = ScanOptions { force_remote_refresh };
+
+		if media_type == "show" {
+			let result = scan_show_category(category_root, item_root, app_data_dir, &api_keys, &mut progress, options)?;
+			let items = result.series_items.into_iter().chain(result.episode_items).collect::<Vec<_>>();
+			return state.database.upsert_media_items(&items, &[], &[]);
+		}
+
+		let result = scan_flat_category(category_root, item_root, media_type, app_data_dir, &api_keys, &mut progress, options)?;
+		state.database.upsert_media_items(&result.items, &result.directors, &result.director_links)
 	}
 }
 
@@ -198,8 +230,7 @@ fn scan_and_sync_libraries(
 	for root in roots {
 		progress.emit_status("root", format!("Lendo raiz {}", root));
 		let scan_result = scan_root(Path::new(root), app_data_dir, &MetadataApiKeys {
-			tmdb_api_key: api_keys.tmdb_api_key.clone(),
-			omdb_api_key: api_keys.omdb_api_key.clone()
+			tmdb_api_key: api_keys.tmdb_api_key.clone()
 		}, &mut progress, options)?;
 		combined_scan_result.top_level_count += scan_result.top_level_count;
 		combined_scan_result.items.extend(scan_result.items);
@@ -264,14 +295,15 @@ fn scan_root(
 		(root.join("standup"), "standup"),
 		(root.join("concerts"), "concert")
 	] {
-		let flat_result = scan_flat_category(&path, media_type, app_data_dir, api_keys, progress, options)?;
+		let flat_result = scan_flat_category(&path, &path, media_type, app_data_dir, api_keys, progress, options)?;
 		result.top_level_count += flat_result.items.len();
 		result.items.extend(flat_result.items);
 		result.directors.extend(flat_result.directors);
 		result.director_links.extend(flat_result.director_links);
 	}
 
-	let show_result = scan_show_category(&root.join("shows"), app_data_dir, api_keys, progress, options)?;
+	let shows_root = root.join("shows");
+	let show_result = scan_show_category(&shows_root, &shows_root, app_data_dir, api_keys, progress, options)?;
 	result.top_level_count += show_result.series_items.len();
 	result.items.extend(show_result.series_items);
 	result.items.extend(show_result.episode_items);
@@ -287,6 +319,7 @@ fn scan_root(
 
 fn scan_flat_category(
 	category_root: &Path,
+	walk_root: &Path,
 	media_type: &str,
 	app_data_dir: &Path,
 	api_keys: &MetadataApiKeys,
@@ -297,20 +330,29 @@ fn scan_flat_category(
 		return Ok(FlatScanResult::default());
 	}
 
-	progress.emit_status("scan", format!("Escaneando {}", category_root.display()));
+	progress.emit_status("scan", format!("Escaneando {}", walk_root.display()));
 	let mut result = FlatScanResult::default();
 
-	for entry in WalkDir::new(category_root).follow_links(true).into_iter().filter_map(Result::ok) {
+	for entry in WalkDir::new(walk_root).follow_links(true).into_iter().filter_map(Result::ok) {
 		let path = entry.path();
 
 		if !entry.file_type().is_file() || !is_video_file(path) {
 			continue;
 		}
 
+		// Library contract: a movie's Extras/ folder is bonus material, not more movies.
+		let in_extras = path
+			.strip_prefix(category_root)
+			.map(|relative| relative.components().any(|component| component.as_os_str().eq_ignore_ascii_case("extras")))
+			.unwrap_or(false);
+		if in_extras {
+			continue;
+		}
+
 		let media_directory = path.parent().unwrap_or(category_root);
 		let source_name = file_stem(path);
 		let display_name = preferred_flat_display_name(category_root, media_directory, &source_name);
-		let (title, year) = parse_media_name(&display_name);
+		let (title, year) = parse_contract_item_name(&display_name).unwrap_or_else(|| parse_media_name(&display_name));
 
 		let mut item = MediaItemRecord {
 			id: path.to_string_lossy().to_string(),
@@ -330,7 +372,8 @@ fn scan_flat_category(
 			imdb_id: None,
 			tmdb_id: None,
 			media_path: path.to_string_lossy().to_string(),
-			subtitle_path: find_companion_file(media_directory, &["subtitle", "subtitles"], SUBTITLE_EXTENSIONS)
+			subtitle_path: find_video_subtitle(path)
+				.or_else(|| find_companion_file(media_directory, &["subtitle", "subtitles"], SUBTITLE_EXTENSIONS))
 				.or_else(|| find_any_with_extension(media_directory, SUBTITLE_EXTENSIONS)),
 			source_name,
 			show_id: None,
@@ -365,6 +408,7 @@ fn scan_flat_category(
 
 fn scan_show_category(
 	shows_root: &Path,
+	walk_root: &Path,
 	app_data_dir: &Path,
 	api_keys: &MetadataApiKeys,
 	progress: &mut ScanProgress,
@@ -374,10 +418,10 @@ fn scan_show_category(
 		return Ok(ShowScanResult::default());
 	}
 
-	progress.emit_status("scan", format!("Escaneando {}", shows_root.display()));
+	progress.emit_status("scan", format!("Escaneando {}", walk_root.display()));
 	let mut shows = BTreeMap::<String, ShowAggregate>::new();
 
-	for entry in WalkDir::new(shows_root).follow_links(true).into_iter().filter_map(Result::ok) {
+	for entry in WalkDir::new(walk_root).follow_links(true).into_iter().filter_map(Result::ok) {
 		let path = entry.path();
 
 		if !entry.file_type().is_file() || !is_video_file(path) {
@@ -400,10 +444,24 @@ fn scan_show_category(
 		let season_folder_name = parts.get(1).copied();
 		let series_root = shows_root.join(series_folder_name);
 		let show_id = series_root.to_string_lossy().to_string();
-		let (series_title, year) = parse_media_name(series_folder_name);
-		let season_number = season_folder_name.and_then(parse_season_number).unwrap_or(1) as i32;
-		let episode_number = parse_episode_number(&source_name).map(|value| value as i32);
-		let episode_title = parse_episode_title(&source_name, episode_number);
+		let (series_title, year) = parse_contract_item_name(series_folder_name).unwrap_or_else(|| parse_media_name(series_folder_name));
+		// Library contract: "Specials" is season 0, "Extras" is EXTRAS_SEASON;
+		// contract-named files ("S01E02 - Name") keep their title verbatim.
+		let season_number = match season_folder_name.map(str::to_ascii_lowercase).as_deref() {
+			Some("specials") => 0,
+			Some("extras") => EXTRAS_SEASON,
+			_ => season_folder_name.and_then(parse_season_number).unwrap_or(1) as i32
+		};
+		let (episode_number, episode_title) = if season_number == EXTRAS_SEASON {
+			(None, source_name.clone())
+		} else if let Some((episode, title)) = parse_contract_episode_name(&source_name) {
+			(Some(episode), title)
+		} else if let Some(title) = parse_contract_special_name(&source_name) {
+			(None, title)
+		} else {
+			let episode_number = parse_episode_number(&source_name).map(|value| value as i32);
+			(episode_number, parse_episode_title(&source_name, episode_number))
+		};
 		let poster_path = find_nearest_poster(media_directory, shows_root, series_folder_name);
 		let cover_path = find_nearest_cover(media_directory, shows_root, series_folder_name);
 
@@ -425,8 +483,9 @@ fn scan_show_category(
 			imdb_id: None,
 			tmdb_id: None,
 			media_path: path.to_string_lossy().to_string(),
-			subtitle_path: find_companion_file(media_directory, &["subtitle", "subtitles"], SUBTITLE_EXTENSIONS)
-				.or_else(|| find_any_with_extension(media_directory, SUBTITLE_EXTENSIONS)),
+			// A season folder holds many episodes, so only a subtitle named after
+			// this file belongs to it.
+			subtitle_path: find_video_subtitle(path),
 			source_name: source_name.clone(),
 			show_id: Some(show_id.clone()),
 			season_number: Some(season_number),
@@ -458,14 +517,27 @@ fn scan_show_category(
 	let mut result = ShowScanResult::default();
 
 	for (_, mut show) in shows {
+		// Unnumbered entries (specials catalogued as movies, extras) go after the
+		// numbered ones, oldest first.
 		show.episodes.sort_by(|left, right| {
 			left
 				.season_number
 				.unwrap_or(1)
 				.cmp(&right.season_number.unwrap_or(1))
-				.then(left.episode_number.unwrap_or(0).cmp(&right.episode_number.unwrap_or(0)))
-				.then_with(|| left.title.cmp(&right.title))
+				.then(left.episode_number.unwrap_or(i32::MAX).cmp(&right.episode_number.unwrap_or(i32::MAX)))
+				.then(parse_year_in_parentheses(&left.source_name).cmp(&parse_year_in_parentheses(&right.source_name)))
+				.then_with(|| left.source_name.cmp(&right.source_name))
 		});
+
+		// Specials TMDb lists as movies carry their display title in the show's
+		// metadata file ("specials": { "<file name>": { "title": ... } }).
+		let special_titles = read_special_titles(Path::new(&show.media_path));
+		for episode in show.episodes.iter_mut().filter(|episode| episode.season_number == Some(0)) {
+			let file_name = Path::new(&episode.media_path).file_name().and_then(OsStr::to_str).unwrap_or_default();
+			if let Some(title) = special_titles.get(file_name) {
+				episode.title = title.clone();
+			}
+		}
 
 		let mut series_item = MediaItemRecord {
 			id: show.show_id,
@@ -954,7 +1026,7 @@ fn detect_picture_extension(data: &[u8]) -> &'static str {
 	"jpg"
 }
 
-fn is_video_file(path: &Path) -> bool {
+pub(crate) fn is_video_file(path: &Path) -> bool {
 	has_extension(path, VIDEO_EXTENSIONS)
 }
 
@@ -962,7 +1034,7 @@ fn is_audio_file(path: &Path) -> bool {
 	has_extension(path, AUDIO_EXTENSIONS)
 }
 
-fn has_extension(path: &Path, extensions: &[&str]) -> bool {
+pub(crate) fn has_extension(path: &Path, extensions: &[&str]) -> bool {
 	path
 		.extension()
 		.and_then(OsStr::to_str)
@@ -999,7 +1071,88 @@ fn find_any_with_extension(directory: &Path, extensions: &[&str]) -> Option<Stri
 	None
 }
 
-fn parse_media_name(raw: &str) -> (String, Option<i32>) {
+/// "Title (Year)" (the library contract) -> ("Title", Year), title verbatim.
+fn parse_contract_item_name(name: &str) -> Option<(String, Option<i32>)> {
+	let (title, rest) = name.rsplit_once(" (")?;
+	let year = rest.strip_suffix(')')?;
+	if year.len() != 4 || !year.chars().all(|character| character.is_ascii_digit()) || title.trim().is_empty() {
+		return None;
+	}
+	Some((title.trim().to_string(), year.parse().ok()))
+}
+
+/// The subtitles of one video, `<stem>.<ext>` or `<stem>.<lang>[.<qualifier>].<ext>`
+/// (library contract), with their tag (`""`, `"en"`, `"pt-br.sdh"`): the
+/// untagged one first, then Portuguese, then the rest.
+pub(crate) fn list_video_subtitles(video: &Path) -> Vec<(PathBuf, String)> {
+	let (Some(stem), Some(folder)) = (video.file_stem().and_then(OsStr::to_str), video.parent()) else {
+		return Vec::new();
+	};
+	let mut matches = std::fs::read_dir(folder)
+		.map(|entries| {
+			entries
+				.filter_map(Result::ok)
+				.map(|entry| entry.path())
+				.filter(|path| has_extension(path, SUBTITLE_EXTENSIONS))
+				.filter_map(|path| {
+					let subtitle_stem = path.file_stem().and_then(OsStr::to_str)?.to_string();
+					let tag = if subtitle_stem == stem {
+						String::new()
+					} else {
+						subtitle_stem.strip_prefix(stem)?.strip_prefix('.')?.to_ascii_lowercase()
+					};
+					let rank = if tag.is_empty() { 0 } else if tag.starts_with("pt") || tag.starts_with("por") { 1 } else { 2 };
+					Some((rank, path, tag))
+				})
+				.collect::<Vec<_>>()
+		})
+		.unwrap_or_default();
+	matches.sort();
+	matches.into_iter().map(|(_, path, tag)| (path, tag)).collect()
+}
+
+pub(crate) fn find_video_subtitle(video: &Path) -> Option<String> {
+	list_video_subtitles(video).into_iter().next().map(|(path, _)| path.to_string_lossy().to_string())
+}
+
+/// "S01E02 - Episode Name" (the library contract) -> (2, "Episode Name").
+fn parse_contract_episode_name(stem: &str) -> Option<(i32, String)> {
+	let (token, title) = stem.split_once(" - ")?;
+	let (_, episode) = parse_sxe_token(&token.to_ascii_lowercase())?;
+	let title = title.trim();
+	(!title.is_empty()).then(|| (episode as i32, title.to_string()))
+}
+
+/// "Special - Post COVID (2021)" (a special TMDb lists as a movie) -> "Post COVID".
+fn parse_contract_special_name(stem: &str) -> Option<String> {
+	let rest = stem.strip_prefix("Special - ")?;
+	let title = match find_year_parentheses_range(rest) {
+		Some((content_start, _)) => rest[..content_start.saturating_sub(1)].trim(),
+		None => rest.trim()
+	};
+	(!title.is_empty()).then(|| title.to_string())
+}
+
+fn read_special_titles(show_root: &Path) -> BTreeMap<String, String> {
+	let Ok(raw) = fs::read_to_string(show_root.join(".local-cinema.json")) else {
+		return BTreeMap::new();
+	};
+	let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+		return BTreeMap::new();
+	};
+
+	json.get("specials")
+		.and_then(serde_json::Value::as_object)
+		.map(|specials| {
+			specials
+				.iter()
+				.filter_map(|(file_name, entry)| Some((file_name.clone(), entry.get("title")?.as_str()?.to_string())))
+				.collect()
+		})
+		.unwrap_or_default()
+}
+
+pub(crate) fn parse_media_name(raw: &str) -> (String, Option<i32>) {
 	let normalized = normalize_name(raw);
 	let tokens = normalized.split_whitespace().collect::<Vec<_>>();
 	let mut title_tokens = Vec::new();
@@ -1067,7 +1220,7 @@ fn looks_like_season_folder(raw: &str) -> bool {
 	parse_season_number(raw).is_some()
 }
 
-fn parse_season_number(raw: &str) -> Option<u32> {
+pub(crate) fn parse_season_number(raw: &str) -> Option<u32> {
 	let tokens = normalize_name(raw);
 	let words = tokens.split_whitespace().collect::<Vec<_>>();
 
@@ -1096,7 +1249,7 @@ fn parse_season_number(raw: &str) -> Option<u32> {
 	None
 }
 
-fn parse_episode_number(raw: &str) -> Option<u32> {
+pub(crate) fn parse_episode_number(raw: &str) -> Option<u32> {
 	for word in normalize_name(raw).split_whitespace() {
 		let lower = word.to_ascii_lowercase();
 
@@ -1331,8 +1484,10 @@ fn find_nearest_cover(media_directory: &Path, shows_root: &Path, series_folder_n
 	})
 }
 
-const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "mov", "wmv", "m4v", "webm"];
+/// Season number of a show's "Extras" folder (bonus material, not episodes).
+pub const EXTRAS_SEASON: i32 = -1;
+pub(crate) const VIDEO_EXTENSIONS: &[&str] = &["mkv", "mp4", "avi", "mov", "wmv", "m4v", "webm", "m2ts", "ts", "mpg", "mpeg"];
 const AUDIO_EXTENSIONS: &[&str] = &["flac", "mp3", "m4a", "aac", "ogg", "opus", "wav", "wma"];
 const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "jfif", "png", "webp", "gif", "bmp", "avif"];
-const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "ass", "ssa", "vtt", "sub"];
+pub(crate) const SUBTITLE_EXTENSIONS: &[&str] = &["srt", "ass", "ssa", "vtt", "sub"];
 const CACHED_IMAGE_EXTENSIONS: &[&str] = &["jpg", "png", "gif", "webp", "bmp"];

@@ -12,8 +12,7 @@ pub struct MetadataModule;
 
 #[derive(Debug, Clone, Default)]
 pub struct MetadataApiKeys {
-	pub tmdb_api_key: Option<String>,
-	pub omdb_api_key: Option<String>
+	pub tmdb_api_key: Option<String>
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,28 +59,6 @@ struct LocalMetadataConfig {
 	imdb_rating: Option<String>,
 	imdb_id: Option<String>,
 	tmdb_id: Option<String>
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct OmdbResponse {
-	response: String,
-	#[serde(default)]
-	year: Option<String>,
-	#[serde(default)]
-	genre: Option<String>,
-	#[serde(default)]
-	director: Option<String>,
-	#[serde(default)]
-	actors: Option<String>,
-	#[serde(default)]
-	country: Option<String>,
-	#[serde(default)]
-	imdb_rating: Option<String>,
-	#[serde(default)]
-	imdb_id: Option<String>,
-	#[serde(default)]
-	poster: Option<String>
 }
 
 #[derive(Debug, Deserialize)]
@@ -522,27 +499,18 @@ fn fetch_live_remote_metadata(
 		has_local_artwork
 	));
 
-	let mut metadata = VideoMetadata::default();
-
-	if let Some(omdb_metadata) = fetch_omdb_metadata(client, metadata_root, title, year, media_type, api_keys, imdb_id, has_local_artwork) {
-		metadata.merge_missing(omdb_metadata);
-	}
-
-	if needs_tmdb_fallback(&metadata) {
-		if let Some(tmdb_metadata) = fetch_tmdb_metadata(
-			client,
-			metadata_root,
-			app_data_dir,
-			title,
-			year,
-			media_type,
-			api_keys,
-			tmdb_id,
-			has_local_artwork
-		) {
-			metadata.merge_missing(tmdb_metadata);
-		}
-	}
+	let metadata = fetch_tmdb_metadata(
+		client,
+		metadata_root,
+		app_data_dir,
+		title,
+		year,
+		media_type,
+		api_keys,
+		tmdb_id,
+		has_local_artwork
+	)
+	.unwrap_or_default();
 
 	if metadata.is_empty() {
 		metadata_debug("remote result empty".to_string());
@@ -560,90 +528,6 @@ fn fetch_live_remote_metadata(
 		));
 		Some(metadata)
 	}
-}
-
-fn fetch_omdb_metadata(
-	client: &Client,
-	metadata_root: &Path,
-	title: &str,
-	year: Option<i32>,
-	media_type: &str,
-	api_keys: &MetadataApiKeys,
-	imdb_id: Option<&str>,
-	has_local_artwork: bool
-) -> Option<VideoMetadata> {
-	let api_key = api_keys.omdb_api_key.as_deref().filter(|value| !value.trim().is_empty()).map(str::to_string);
-	if api_key.is_none() {
-		metadata_debug("omdb skip missing OMDB_API_KEY".to_string());
-	}
-	let api_key = api_key?;
-	metadata_debug(format!("omdb request title={:?} year={:?} media_type={} imdb_id={:?}", title, year, media_type, imdb_id));
-	let mut request = client
-		.get("https://www.omdbapi.com/")
-		.query(&[("apikey", api_key.as_str()), ("r", "json")]);
-
-	if let Some(imdb_id) = imdb_id.filter(|value| !value.trim().is_empty()) {
-		request = request.query(&[("i", imdb_id)]);
-	} else {
-		let omdb_type = if media_type == "show" { "series" } else { "movie" };
-		request = request.query(&[("t", title), ("type", omdb_type)]);
-
-		if let Some(year) = year {
-			let year_value = year.to_string();
-			request = request.query(&[("y", year_value.as_str())]);
-		}
-	}
-
-	let response = match request.send() {
-		Ok(response) => response,
-		Err(error) => {
-			metadata_debug(format!("omdb request failed: {}", error));
-			return None;
-		}
-	};
-	let response = match response.error_for_status() {
-		Ok(response) => response,
-		Err(error) => {
-			metadata_debug(format!("omdb status error: {}", error));
-			return None;
-		}
-	};
-	let payload = match response.json::<OmdbResponse>() {
-		Ok(payload) => payload,
-		Err(error) => {
-			metadata_debug(format!("omdb json error: {}", error));
-			return None;
-		}
-	};
-
-	if payload.response != "True" {
-		metadata_debug(format!("omdb no match title={:?} year={:?}", title, year));
-		return None;
-	}
-
-	let poster_path = payload
-		.poster
-		.as_deref()
-		.and_then(normalize_text_value)
-		.and_then(|poster_url| store_poster_in_metadata_root(client, metadata_root, poster_url, has_local_artwork));
-	metadata_debug(format!("omdb result poster={:?} imdb_id={:?} rating={:?}", poster_path, payload.imdb_id, payload.imdb_rating));
-
-	Some(VideoMetadata {
-		year: payload.year.as_deref().and_then(parse_year_from_text),
-		cover_path: poster_path.clone(),
-		poster_path,
-		overview: None,
-		english_title: None,
-		original_title: None,
-		genre: payload.genre.as_deref().and_then(normalize_text_value).map(normalize_joined_genres),
-		director: payload.director.as_deref().and_then(normalize_text_value).map(ToOwned::to_owned),
-		directors: Vec::new(),
-		actors: payload.actors.as_deref().and_then(normalize_text_value).map(ToOwned::to_owned),
-		country: payload.country.as_deref().and_then(normalize_text_value).map(normalize_joined_countries),
-		imdb_rating: payload.imdb_rating.as_deref().and_then(normalize_text_value).map(ToOwned::to_owned),
-		imdb_id: payload.imdb_id.as_deref().and_then(normalize_text_value).map(ToOwned::to_owned),
-		tmdb_id: None
-	})
 }
 
 fn fetch_tmdb_metadata(
@@ -1301,10 +1185,6 @@ fn has_remote_metadata_keys(api_keys: &MetadataApiKeys) -> bool {
 		.tmdb_api_key
 		.as_deref()
 		.is_some_and(|value| !value.trim().is_empty())
-		|| api_keys
-			.omdb_api_key
-			.as_deref()
-			.is_some_and(|value| !value.trim().is_empty())
 }
 
 fn is_metadata_complete_for_scan(metadata: &VideoMetadata, has_local_artwork: bool) -> bool {
@@ -1315,18 +1195,6 @@ fn is_metadata_complete_for_scan(metadata: &VideoMetadata, has_local_artwork: bo
 		&& metadata.actors.is_some()
 		&& metadata.country.is_some()
 		&& metadata.imdb_rating.is_some()
-}
-
-fn needs_tmdb_fallback(metadata: &VideoMetadata) -> bool {
-	metadata.poster_path.is_none()
-		|| metadata.english_title.is_none()
-		|| metadata.original_title.is_none()
-		|| metadata.genre.is_none()
-		|| metadata.director.is_none()
-		|| metadata.directors.is_empty()
-		|| metadata.actors.is_none()
-		|| metadata.country.is_none()
-		|| metadata.imdb_rating.is_none()
 }
 
 fn build_cache_key(
@@ -1452,7 +1320,7 @@ fn token_overlap_score(left: &str, right: &str) -> f64 {
 	shared as f64 / left_tokens.len().max(right_tokens.len()) as f64
 }
 
-fn format_rating_value(value: f64) -> Option<String> {
+pub(crate) fn format_rating_value(value: f64) -> Option<String> {
 	(value > 0.0).then(|| format!("{value:.1}"))
 }
 
@@ -1499,7 +1367,7 @@ fn normalize_joined_values(raw: &str, mapper: fn(&str) -> String) -> String {
 	values.join(", ")
 }
 
-fn normalize_genre_label(raw: &str) -> String {
+pub(crate) fn normalize_genre_label(raw: &str) -> String {
 	match normalize_match_title(raw).as_str() {
 		"action" | "acao" => "Acao".to_string(),
 		"adventure" | "aventura" => "Aventura".to_string(),
@@ -1523,7 +1391,7 @@ fn normalize_genre_label(raw: &str) -> String {
 	}
 }
 
-fn normalize_country_label(raw: &str) -> String {
+pub(crate) fn normalize_country_label(raw: &str) -> String {
 	match normalize_match_title(raw).as_str() {
 		"us" | "usa" | "united states" | "united states of america" | "eua" => "EUA".to_string(),
 		"br" | "brazil" | "brasil" => "Brasil".to_string(),
@@ -1565,6 +1433,184 @@ fn dedupe_joined(values: Vec<String>) -> String {
 	}
 
 	unique.join(", ")
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TmdbCandidate {
+	pub tmdb_id: String,
+	pub title: String,
+	pub original_title: Option<String>,
+	pub year: Option<i32>,
+	pub poster_url: Option<String>,
+	pub overview: Option<String>
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbSeasonResponse {
+	#[serde(default)]
+	episodes: Vec<TmdbSeasonEpisode>
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbSeasonEpisode {
+	episode_number: u32,
+	#[serde(default)]
+	name: Option<String>
+}
+
+#[derive(Debug, Deserialize)]
+struct TmdbCandidateRaw {
+	id: i64,
+	#[serde(default)]
+	title: Option<String>,
+	#[serde(default)]
+	name: Option<String>,
+	#[serde(default)]
+	original_title: Option<String>,
+	#[serde(default)]
+	original_name: Option<String>,
+	#[serde(default)]
+	release_date: Option<String>,
+	#[serde(default)]
+	first_air_date: Option<String>,
+	#[serde(default)]
+	poster_path: Option<String>,
+	#[serde(default)]
+	overview: Option<String>
+}
+
+impl TmdbCandidateRaw {
+	fn into_candidate(self) -> TmdbCandidate {
+		TmdbCandidate {
+			tmdb_id: self.id.to_string(),
+			title: self.title.or(self.name).unwrap_or_default(),
+			original_title: self.original_title.or(self.original_name),
+			year: self
+				.release_date
+				.as_deref()
+				.or(self.first_air_date.as_deref())
+				.and_then(parse_year_from_text),
+			poster_url: self.poster_path.map(|path| format!("https://image.tmdb.org/t/p/w342{}", path)),
+			overview: self.overview.as_deref().and_then(normalize_text_value).map(ToOwned::to_owned)
+		}
+	}
+}
+
+/// TMDb helpers for the import flow. `kind` is TMDb's "movie" or "tv".
+impl MetadataModule {
+	pub fn tmdb_search(api_key: &str, kind: &str, query: &str, year: Option<i32>) -> Result<Vec<TmdbCandidate>, String> {
+		#[derive(Deserialize)]
+		struct SearchResponse {
+			#[serde(default)]
+			results: Vec<TmdbCandidateRaw>
+		}
+
+		let client = build_http_client().ok_or_else(|| "HTTP client unavailable".to_string())?;
+		let mut request = client
+			.get(format!("https://api.themoviedb.org/3/search/{}", kind))
+			.query(&[("api_key", api_key), ("query", query), ("include_adult", "false"), ("language", "en-US")]);
+
+		if let Some(year) = year {
+			let year_param = if kind == "tv" { "first_air_date_year" } else { "year" };
+			request = request.query(&[(year_param, year.to_string())]);
+		}
+
+		let response = request
+			.send()
+			.and_then(|response| response.error_for_status())
+			.map_err(|error| format!("TMDb search failed: {}", error))?
+			.json::<SearchResponse>()
+			.map_err(|error| format!("TMDb search returned invalid JSON: {}", error))?;
+
+		Ok(response.results.into_iter().take(8).map(TmdbCandidateRaw::into_candidate).collect())
+	}
+
+	pub fn tmdb_details(api_key: &str, kind: &str, tmdb_id: &str) -> Result<TmdbCandidate, String> {
+		let client = build_http_client().ok_or_else(|| "HTTP client unavailable".to_string())?;
+		client
+			.get(format!("https://api.themoviedb.org/3/{}/{}", kind, tmdb_id.trim()))
+			.query(&[("api_key", api_key), ("language", "en-US")])
+			.send()
+			.and_then(|response| response.error_for_status())
+			.map_err(|error| format!("TMDb details failed: {}", error))?
+			.json::<TmdbCandidateRaw>()
+			.map(TmdbCandidateRaw::into_candidate)
+			.map_err(|error| format!("TMDb details returned invalid JSON: {}", error))
+	}
+
+	/// Episode number -> episode name for one season; empty when TMDb doesn't know it.
+	pub fn tmdb_season_episode_names(api_key: &str, tmdb_id: &str, season: u32) -> Vec<(u32, String)> {
+		let Some(client) = build_http_client() else {
+			return Vec::new();
+		};
+
+		client
+			.get(format!("https://api.themoviedb.org/3/tv/{}/season/{}", tmdb_id.trim(), season))
+			.query(&[("api_key", api_key), ("language", "en-US")])
+			.send()
+			.and_then(|response| response.error_for_status())
+			.and_then(|response| response.json::<TmdbSeasonResponse>())
+			.map(|season| {
+				season
+					.episodes
+					.into_iter()
+					.filter_map(|episode| {
+						let name = episode.name.as_deref().and_then(normalize_text_value)?.to_string();
+						Some((episode.episode_number, name))
+					})
+					.collect()
+			})
+			.unwrap_or_default()
+	}
+
+	/// Writes the identity of a freshly imported item so the next
+	/// `resolve_video_metadata` fetches the right TMDb entry instead of guessing.
+	pub fn write_identity_seed(metadata_root: &Path, year: Option<i32>, tmdb_id: Option<&str>) -> Result<(), String> {
+		let mut document = read_local_metadata_document(metadata_root).unwrap_or_else(|| Value::Object(Map::new()));
+		let object = document
+			.as_object_mut()
+			.ok_or_else(|| "Local metadata file is not a JSON object".to_string())?;
+
+		if year.is_some() {
+			set_json_number(object, "year", year);
+		}
+
+		if let Some(tmdb_id) = tmdb_id {
+			set_json_string(object, "tmdbId", Some(tmdb_id.to_string()));
+		}
+
+		let json = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?;
+		fs::write(metadata_root.join(LOCAL_METADATA_FILE_NAMES[0]), json).map_err(|error| error.to_string())
+	}
+}
+
+/// Sets (or, with `None`, removes) keys of the item's local metadata file and
+/// keeps every other key. Local metadata wins over remote, so this is how a
+/// confirmed refresh sticks.
+impl MetadataModule {
+	pub fn write_local_metadata_fields(metadata_root: &Path, fields: &[(&str, Option<Value>)]) -> Result<(), String> {
+		let mut document = read_local_metadata_document(metadata_root).unwrap_or_else(|| Value::Object(Map::new()));
+		let object = document
+			.as_object_mut()
+			.ok_or_else(|| "Local metadata file is not a JSON object".to_string())?;
+
+		for (key, value) in fields {
+			match value {
+				Some(value) => object.insert(key.to_string(), value.clone()),
+				None => object.remove(*key)
+			};
+		}
+
+		// Write back to whichever file the scanner reads, not always the first name.
+		let path = LOCAL_METADATA_FILE_NAMES
+			.iter()
+			.map(|file_name| metadata_root.join(file_name))
+			.find(|path| path.exists())
+			.unwrap_or_else(|| metadata_root.join(LOCAL_METADATA_FILE_NAMES[0]));
+		let json = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?;
+		fs::write(path, json).map_err(|error| error.to_string())
+	}
 }
 
 const LOCAL_METADATA_FILE_NAMES: &[&str] = &[".local-cinema.json", "metadata.json", "media.json"];

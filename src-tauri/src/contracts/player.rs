@@ -30,3 +30,22 @@ pub struct PlayerStatusDto {
   pub is_muted: bool,
   pub last_error: Option<String>
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleTrackDto {
+  pub id: String,
+  pub language: Option<String>,
+  pub title: Option<String>,
+  pub external: bool,
+  pub selected: bool
+}
+
+/// A subtitle file next to a video, for the <video> player to load as tracks.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleFileDto {
+  pub path: String,
+  /// Library contract tag: "" (untagged), "en", "pt-br.sdh".
+  pub tag: String
+}

@@ -25,3 +25,11 @@ body {
 * {
   box-sizing: border-box;
 }
+
+/* Subtitles in the <video> player. The default is text on a dark box that hides
+   the picture; plain white text with a dark outline reads on any frame. */
+video::cue {
+  background-color: transparent;
+  color: #fff;
+  text-shadow: 0 0 3px #000, 0 0 3px #000, 1px 1px 2px #000, -1px -1px 2px #000, 0 2px 8px rgba(0, 0, 0, 0.8);
+}

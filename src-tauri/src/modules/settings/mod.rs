@@ -5,12 +5,29 @@ pub struct SettingsModule;
 const LIBRARY_ROOT_PATHS_KEY: &str = "library_root_paths";
 const LEGACY_LIBRARY_ROOT_PATH_KEY: &str = "library_root_path";
 const TMDB_API_KEY: &str = "tmdb_api_key";
-const OMDB_API_KEY: &str = "omdb_api_key";
+const ANTHROPIC_API_KEY: &str = "anthropic_api_key";
+const OPENSUBTITLES_API_KEY: &str = "opensubtitles_api_key";
+const OPENSUBTITLES_USERNAME: &str = "opensubtitles_username";
+const OPENSUBTITLES_PASSWORD: &str = "opensubtitles_password";
+const SUBTITLE_LANGUAGES: &str = "subtitle_languages";
+const DEFAULT_SUBTITLE_LANGUAGES: &str = "pt-BR, en";
+
+/// OpenSubtitles account for "Atualizar" > Legendas. The login is optional;
+/// without it downloads count against the API key's anonymous quota.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubtitleSettings {
+	pub api_key: Option<String>,
+	pub username: Option<String>,
+	pub password: Option<String>,
+	/// Comma-separated, in order of preference, e.g. "pt-BR, en".
+	pub languages: String
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct MetadataApiKeys {
 	pub tmdb_api_key: Option<String>,
-	pub omdb_api_key: Option<String>
+	pub anthropic_api_key: Option<String>
 }
 
 impl SettingsModule {
@@ -59,17 +76,33 @@ impl SettingsModule {
 	pub fn metadata_api_keys(state: &AppState) -> Result<MetadataApiKeys, String> {
 		Ok(MetadataApiKeys {
 			tmdb_api_key: read_optional_setting(state, TMDB_API_KEY)?,
-			omdb_api_key: read_optional_setting(state, OMDB_API_KEY)?
+			anthropic_api_key: read_optional_setting(state, ANTHROPIC_API_KEY)?
 		})
 	}
 
 	pub fn save_metadata_api_keys(
 		state: &AppState,
 		tmdb_api_key: Option<&str>,
-		omdb_api_key: Option<&str>
+		anthropic_api_key: Option<&str>
 	) -> Result<(), String> {
 		write_optional_setting(state, TMDB_API_KEY, tmdb_api_key)?;
-		write_optional_setting(state, OMDB_API_KEY, omdb_api_key)
+		write_optional_setting(state, ANTHROPIC_API_KEY, anthropic_api_key)
+	}
+
+	pub fn subtitle_settings(state: &AppState) -> Result<SubtitleSettings, String> {
+		Ok(SubtitleSettings {
+			api_key: read_optional_setting(state, OPENSUBTITLES_API_KEY)?,
+			username: read_optional_setting(state, OPENSUBTITLES_USERNAME)?,
+			password: read_optional_setting(state, OPENSUBTITLES_PASSWORD)?,
+			languages: read_optional_setting(state, SUBTITLE_LANGUAGES)?.unwrap_or_else(|| DEFAULT_SUBTITLE_LANGUAGES.to_string())
+		})
+	}
+
+	pub fn save_subtitle_settings(state: &AppState, settings: &SubtitleSettings) -> Result<(), String> {
+		write_optional_setting(state, OPENSUBTITLES_API_KEY, settings.api_key.as_deref())?;
+		write_optional_setting(state, OPENSUBTITLES_USERNAME, settings.username.as_deref())?;
+		write_optional_setting(state, OPENSUBTITLES_PASSWORD, settings.password.as_deref())?;
+		write_optional_setting(state, SUBTITLE_LANGUAGES, Some(&settings.languages))
 	}
 
 	pub fn save_tmdb_api_key(state: &AppState, tmdb_api_key: Option<&str>) -> Result<(), String> {

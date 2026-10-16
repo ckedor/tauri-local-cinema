@@ -1,4 +1,6 @@
 import { MusicArtistDetailView } from "@/features/library/components/MusicArtistDetailView";
+import { RefreshDialog } from "@/features/library/components/RefreshDialog";
+import { ShowDetailView } from "@/features/library/components/ShowDetailView";
 import { supportsInterestList } from "@/features/library/services/interestList";
 import { useInterestListStore } from "@/features/library/store/interestList.store";
 import {
@@ -9,7 +11,6 @@ import {
 import { getDisplayTitle, getOriginalTitle } from "@/features/library/utils/titles";
 import { VolumeControl } from "@/features/player/components/VolumeControl";
 import {
-    ContinueWatchingEntry,
     toPlayerSessionFromContinueWatching
 } from "@/features/player/services/continueWatching";
 import { launchPlayer, launchPlayerSession } from "@/features/player/services/launchPlayer";
@@ -28,6 +29,7 @@ import {
     openMediaInExplorer
 } from "@/services/tauri/commands/library";
 import {
+    EXTRAS_SEASON,
     HomeMediaItemDto,
     MusicAlbumDetailDto,
     MusicArtistDetailDto,
@@ -35,8 +37,10 @@ import {
     ShowDetailDto,
     ShowEpisodeDto
 } from "@/types/contracts/library";
+import AutoFixHighRoundedIcon from "@mui/icons-material/AutoFixHighRounded";
 import BookmarkBorderRoundedIcon from "@mui/icons-material/BookmarkBorderRounded";
 import BookmarkRoundedIcon from "@mui/icons-material/BookmarkRounded";
+import ClosedCaptionRoundedIcon from "@mui/icons-material/ClosedCaptionRounded";
 import FolderOpenRoundedIcon from "@mui/icons-material/FolderOpenRounded";
 import PauseRoundedIcon from "@mui/icons-material/PauseRounded";
 import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
@@ -48,11 +52,8 @@ import {
     CircularProgress,
     Divider,
     IconButton,
-    LinearProgress,
     Slider,
     Stack,
-    Tab,
-    Tabs,
     Typography
 } from "@mui/material";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -84,6 +85,11 @@ export function LibraryDetailPage() {
   const [musicAlbumDetailError, setMusicAlbumDetailError] = useState<string | null>(null);
   const [isLoadingMusicAlbumDetail, setIsLoadingMusicAlbumDetail] = useState(false);
   const [hasPosterError, setHasPosterError] = useState(false);
+  // Bumped after "Atualizar" rewrote the item on disk: reloads it and busts
+  // the webview's cache of artwork that kept its file name.
+  const [refreshToken, setRefreshToken] = useState(0);
+  // Which tab "Atualizar" opens on (movies, concerts, stand-up, documentaries); null is closed.
+  const [refreshTab, setRefreshTab] = useState<"metadata" | "subtitles" | null>(null);
   const [posterAspectRatio, setPosterAspectRatio] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [activeAlbumTrackId, setActiveAlbumTrackId] = useState<string | null>(null);
@@ -207,7 +213,7 @@ export function LibraryDetailPage() {
     return () => {
       isMounted = false;
     };
-  }, [continueWatchingEntries, item?.id, item?.mediaType]);
+  }, [continueWatchingEntries, item?.id, item?.mediaType, refreshToken]);
 
   useEffect(() => {
     if (item?.mediaType !== "music_artist") {
@@ -336,8 +342,9 @@ export function LibraryDetailPage() {
       return null;
     }
 
-    return convertFileSrc(detailImagePath);
-  }, [hasPosterError, item?.coverPath, item?.posterPath]);
+    const url = convertFileSrc(detailImagePath);
+    return refreshToken ? `${url}?v=${refreshToken}` : url;
+  }, [hasPosterError, item?.coverPath, item?.posterPath, refreshToken]);
 
   const isNarrowPoster = posterAspectRatio !== null && posterAspectRatio < 1.15;
   const posterFadeMask = isNarrowPoster
@@ -359,16 +366,6 @@ export function LibraryDetailPage() {
 
     return getDefaultBackToPath(item);
   }, [item, navigationState?.backToPath]);
-
-  const selectedSeason = useMemo(() => {
-    if (!showDetail) {
-      return null;
-    }
-
-    return showDetail.seasons.find((season) => season.seasonNumber === selectedSeasonNumber)
-      ?? showDetail.seasons[0]
-      ?? null;
-  }, [selectedSeasonNumber, showDetail]);
 
   const totalEpisodeCount = useMemo(() => {
     if (!showDetail) {
@@ -408,6 +405,19 @@ export function LibraryDetailPage() {
 
     return Math.min(100, (inlineAlbumPlaybackTime / inlineAlbumDuration) * 100);
   }, [inlineAlbumDuration, inlineAlbumPlaybackTime]);
+
+  function handleRefreshed() {
+    if (!item) {
+      return;
+    }
+
+    void getMediaItem(item.id).then((refreshed) => {
+      if (refreshed) {
+        setItem(refreshed);
+      }
+      setRefreshToken(Date.now());
+    });
+  }
 
   async function handlePlayEpisode(episode: ShowEpisodeDto) {
     if (!item) {
@@ -578,6 +588,32 @@ export function LibraryDetailPage() {
             state: { item: album, backToPath: location.pathname }
           })
         }
+      />
+    );
+  }
+
+  if (isShow) {
+    return (
+      <ShowDetailView
+        item={item}
+        posterUrl={posterUrl}
+        detail={showDetail}
+        isLoading={isLoadingShowDetail}
+        errorMessage={showDetailError ?? errorMessage}
+        continueEntry={currentShowContinueEntry}
+        selectedSeasonNumber={selectedSeasonNumber}
+        isInterested={supportsInterest ? isInterested : null}
+        onSelectSeason={setSelectedSeasonNumber}
+        onPlayEpisode={(episode) => void handlePlayEpisode(episode)}
+        onToggleInterest={() => toggleInterestItem(item)}
+        onOpenFolder={() => {
+          void openMediaInExplorer(item.mediaPath).catch((error) => {
+            setErrorMessage(asMessage(error, "Nao foi possivel abrir a pasta da midia."));
+          });
+        }}
+        onPosterError={() => setHasPosterError(true)}
+        onRefreshed={handleRefreshed}
+        onBack={() => navigate(backToPath)}
       />
     );
   }
@@ -826,106 +862,6 @@ export function LibraryDetailPage() {
             {!isMusicArtist && !isMusicAlbum && item.country ? <MetadataRow label="Nacionalidade" value={item.country} /> : null}
           </Stack>
 
-          {isShow && supportsInterest ? (
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
-              <Button
-                color={isInterested ? "secondary" : "inherit"}
-                size="large"
-                startIcon={isInterested ? <BookmarkRoundedIcon /> : <BookmarkBorderRoundedIcon />}
-                sx={{ width: { xs: "100%", sm: "fit-content" } }}
-                variant={isInterested ? "contained" : "outlined"}
-                onClick={() => toggleInterestItem(item)}
-              >
-                {isInterested ? "Remover de Novos" : "Marcar como novo"}
-              </Button>
-            </Stack>
-          ) : null}
-
-          {isShow ? (
-            <Stack spacing={2.5}>
-              <Stack spacing={1}>
-                {isLoadingShowDetail ? (
-                  <Stack direction="row" alignItems="center" spacing={1.5}>
-                    <CircularProgress color="secondary" size={20} />
-                    <Typography color="text.secondary">Carregando episodios...</Typography>
-                  </Stack>
-                ) : null}
-
-                {showDetailError ? <Alert severity="warning">{showDetailError}</Alert> : null}
-
-                {!isLoadingShowDetail && showDetail?.seasons.length ? (
-                  <>
-                    <Tabs
-                      value={selectedSeasonNumber ?? false}
-                      onChange={(_, value: number) => setSelectedSeasonNumber(value)}
-                      variant="scrollable"
-                      scrollButtons="auto"
-                      allowScrollButtonsMobile
-                      sx={{
-                        minHeight: 40,
-                        ".MuiTabs-indicator": { backgroundColor: "primary.main" },
-                        ".MuiTab-root": {
-                          minHeight: 40,
-                          color: "text.secondary"
-                        }
-                      }}
-                    >
-                      {showDetail.seasons.map((season) => (
-                        <Tab
-                          key={season.seasonNumber}
-                          label={formatSeasonLabel(season.seasonNumber)}
-                          value={season.seasonNumber}
-                        />
-                      ))}
-                    </Tabs>
-
-                    <Box
-                      sx={{
-                        borderRadius: 3,
-                        border: "1px solid rgba(255,255,255,0.08)",
-                        backgroundColor: "rgba(255,255,255,0.03)",
-                        overflow: "hidden",
-                        maxHeight: {
-                          xs: 360,
-                          sm: 420,
-                          md: "calc(100vh - 430px)"
-                        }
-                      }}
-                    >
-                      <Stack
-                        divider={<Divider flexItem sx={{ borderColor: "rgba(255,255,255,0.06)" }} />}
-                        sx={{
-                          overflowY: "auto",
-                          maxHeight: "inherit",
-                          "&::-webkit-scrollbar": {
-                            width: 8
-                          },
-                          "&::-webkit-scrollbar-thumb": {
-                            backgroundColor: "rgba(255,255,255,0.12)",
-                            borderRadius: 999
-                          }
-                        }}
-                      >
-                        {selectedSeason?.episodes.map((episode) => (
-                          <EpisodeRow
-                            key={episode.id}
-                            episode={episode}
-                            continueEntry={currentShowContinueEntry?.mediaId === episode.id ? currentShowContinueEntry : null}
-                            onPlay={() => void handlePlayEpisode(episode)}
-                          />
-                        ))}
-                      </Stack>
-                    </Box>
-                  </>
-                ) : null}
-
-                {!isLoadingShowDetail && !showDetailError && !showDetail?.seasons.length ? (
-                  <Typography color="text.secondary">Nenhum episodio encontrado para esta serie.</Typography>
-                ) : null}
-              </Stack>
-            </Stack>
-          ) : null}
-
           {isMusicAlbum ? (
             <Stack spacing={2.5}>
               <Stack
@@ -1029,7 +965,7 @@ export function LibraryDetailPage() {
           ) : null}
 
           {!isShow && !isMusicArtist && !isMusicAlbum ? (
-            <Stack direction={{ xs: "column", sm: "row" }} spacing={2}>
+            <Stack direction={{ xs: "column", sm: "row" }} spacing={2} useFlexGap sx={{ flexWrap: "wrap" }}>
               <Button
                 color="primary"
                 size="large"
@@ -1051,9 +987,27 @@ export function LibraryDetailPage() {
                 </Button>
               ) : null}
 
+              <Button size="large" startIcon={<AutoFixHighRoundedIcon />} variant="outlined" onClick={() => setRefreshTab("metadata")}>
+                Atualizar
+              </Button>
+
+              <Button size="large" startIcon={<ClosedCaptionRoundedIcon />} variant="outlined" onClick={() => setRefreshTab("subtitles")}>
+                Legendas
+              </Button>
+
               <Button size="large" variant="outlined" onClick={() => navigate(backToPath)}>
                 Voltar para a lista
               </Button>
+
+              <RefreshDialog
+                open={refreshTab !== null}
+                initialTab={refreshTab ?? "metadata"}
+                item={item}
+                seasons={[]}
+                initialSeason={null}
+                onClose={() => setRefreshTab(null)}
+                onApplied={handleRefreshed}
+              />
             </Stack>
           ) : null}
         </Stack>
@@ -1130,94 +1084,6 @@ function MetadataRow({ label, value, action }: MetadataRowProps) {
         ) : null}
       </Stack>
       <Typography sx={{ wordBreak: "break-word", fontSize: "0.95rem", lineHeight: 1.45 }}>{value}</Typography>
-    </Stack>
-  );
-}
-
-type EpisodeCardProps = {
-  episode: ShowEpisodeDto;
-  continueEntry: ContinueWatchingEntry | null;
-  onPlay: () => void;
-};
-
-function EpisodeRow({ episode, continueEntry, onPlay }: EpisodeCardProps) {
-  const isCurrentEpisode = Boolean(continueEntry);
-  const progressPercent = continueEntry?.durationSec
-    ? Math.min(100, (continueEntry.progressSec / continueEntry.durationSec) * 100)
-    : 0;
-
-  return (
-    <Stack
-      direction={{ xs: "column", sm: "row" }}
-      spacing={1.15}
-      alignItems={{ xs: "flex-start", sm: "center" }}
-      sx={{
-        px: 1.2,
-        py: 0.85,
-        backgroundColor: isCurrentEpisode ? "rgba(237, 174, 73, 0.08)" : "transparent"
-      }}
-    >
-      <Chip
-        color="secondary"
-        label={formatEpisodeLabel(episode)}
-        size="small"
-        sx={{
-          flexShrink: 0,
-          height: 24,
-          ".MuiChip-label": {
-            px: 0.85,
-            fontSize: "0.7rem",
-            fontWeight: 700
-          }
-        }}
-      />
-
-      <Stack spacing={isCurrentEpisode ? 0.55 : 0.35} sx={{ minWidth: 0, flex: 1 }}>
-        <Typography
-          variant="subtitle1"
-          sx={{
-            fontWeight: 700,
-            fontSize: "0.94rem",
-            lineHeight: 1.25,
-            color: isCurrentEpisode ? "rgba(255,255,255,0.98)" : undefined
-          }}
-        >
-          {episode.title}
-        </Typography>
-
-        {isCurrentEpisode ? (
-          <LinearProgress
-            color="secondary"
-            value={progressPercent}
-            variant="determinate"
-            sx={{
-              maxWidth: 220,
-              height: 6,
-              borderRadius: 999,
-              backgroundColor: "rgba(255,255,255,0.08)"
-            }}
-          />
-        ) : null}
-      </Stack>
-
-      <IconButton
-        aria-label={`${isCurrentEpisode ? "Continuar" : "Assistir"} ${episode.title}`}
-        onClick={onPlay}
-        sx={{
-          alignSelf: { xs: "stretch", sm: "center" },
-          flexShrink: 0,
-          width: 34,
-          height: 34,
-          color: "common.white",
-          backgroundColor: isCurrentEpisode ? "secondary.main" : "primary.main",
-          borderRadius: 999,
-          ":hover": {
-            backgroundColor: isCurrentEpisode ? "secondary.dark" : "primary.dark"
-          }
-        }}
-      >
-        <PlayArrowRoundedIcon fontSize="small" />
-      </IconButton>
     </Stack>
   );
 }
@@ -1345,8 +1211,12 @@ function MusicTrackRow({
 }
 
 function formatEpisodeLabel(episode: ShowEpisodeDto) {
+  if (episode.seasonNumber === EXTRAS_SEASON) {
+    return "Extra";
+  }
+
   if (episode.seasonNumber === 0) {
-    return episode.episodeNumber ? `Extra ${String(episode.episodeNumber).padStart(2, "0")}` : "Extra";
+    return episode.episodeNumber ? `Especial ${String(episode.episodeNumber).padStart(2, "0")}` : "Especial";
   }
 
   const episodePart = episode.episodeNumber ? `E${String(episode.episodeNumber).padStart(2, "0")}` : "EP";
@@ -1357,10 +1227,6 @@ function buildEpisodePlaybackTitle(showTitle: string, episode: ShowEpisodeDto) {
   const parts = [showTitle, formatEpisodeLabel(episode), episode.title].filter(Boolean);
 
   return parts.join(" - ");
-}
-
-function formatSeasonLabel(seasonNumber: number) {
-  return seasonNumber === 0 ? "Extras" : `Temporada ${seasonNumber}`;
 }
 
 function formatTrackLabel(track: MusicTrackDto) {
@@ -1398,29 +1264,30 @@ function getSeasonSummaryLabel(showDetail: ShowDetailDto | null) {
   }
 
   const regularSeasonCount = showDetail.seasons.filter((season) => season.seasonNumber > 0).length;
-  const hasExtras = showDetail.seasons.some((season) => season.seasonNumber === 0);
+  const parts = regularSeasonCount > 0 ? [`${regularSeasonCount} temporadas`] : [];
 
-  if (regularSeasonCount === 0 && hasExtras) {
-    return "Extras";
+  if (showDetail.seasons.some((season) => season.seasonNumber === 0)) {
+    parts.push("especiais");
   }
 
-  if (hasExtras) {
-    return `${regularSeasonCount} temporadas + extras`;
+  if (showDetail.seasons.some((season) => season.seasonNumber === EXTRAS_SEASON)) {
+    parts.push("extras");
   }
 
-  return `${regularSeasonCount} temporadas`;
+  return parts.join(" + ") || "0 temporadas";
 }
 
+// Regular seasons first, then Especiais (0), then Extras.
 function compareShowSeasons(left: ShowDetailDto["seasons"][number], right: ShowDetailDto["seasons"][number]) {
-  if (left.seasonNumber === 0 && right.seasonNumber !== 0) {
-    return 1;
+  return seasonSortKey(left.seasonNumber) - seasonSortKey(right.seasonNumber);
+}
+
+function seasonSortKey(seasonNumber: number) {
+  if (seasonNumber === EXTRAS_SEASON) {
+    return Number.MAX_SAFE_INTEGER;
   }
 
-  if (left.seasonNumber !== 0 && right.seasonNumber === 0) {
-    return -1;
-  }
-
-  return left.seasonNumber - right.seasonNumber;
+  return seasonNumber === 0 ? Number.MAX_SAFE_INTEGER - 1 : seasonNumber;
 }
 
 function compareAlbumsByYear(left: HomeMediaItemDto, right: HomeMediaItemDto) {

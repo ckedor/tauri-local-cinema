@@ -324,8 +324,10 @@ impl DatabaseInfrastructure {
 				WHERE media_type = 'show_episode' AND show_id = ?1
 				ORDER BY
 					COALESCE(season_number, 1) ASC,
-					COALESCE(episode_number, 0) ASC,
-					title COLLATE NOCASE ASC
+					COALESCE(episode_number, 2147483647) ASC,
+					-- Unnumbered specials (Special - Title (2021)) oldest first, then by name.
+					CASE WHEN source_name LIKE 'Special - %(____)' THEN substr(source_name, -5, 4) END ASC,
+					source_name COLLATE NOCASE ASC
 				"
 			)
 			.map_err(|error| error.to_string())?;
@@ -615,11 +617,32 @@ impl DatabaseInfrastructure {
 			.map_err(|error| error.to_string())
 	}
 
+	/// Replaces the library with a full scan: anything not in `items` is deleted.
 	pub fn sync_library(
 		&self,
 		items: &[MediaItemRecord],
 		directors: &[DirectorRecord],
 		director_links: &[MediaDirectorLinkRecord]
+	) -> Result<(), String> {
+		self.write_scan(items, directors, director_links, true)
+	}
+
+	/// Adds or updates the given items and keeps everything else.
+	pub fn upsert_media_items(
+		&self,
+		items: &[MediaItemRecord],
+		directors: &[DirectorRecord],
+		director_links: &[MediaDirectorLinkRecord]
+	) -> Result<(), String> {
+		self.write_scan(items, directors, director_links, false)
+	}
+
+	fn write_scan(
+		&self,
+		items: &[MediaItemRecord],
+		directors: &[DirectorRecord],
+		director_links: &[MediaDirectorLinkRecord],
+		prune: bool
 	) -> Result<(), String> {
 		let mut connection = self.connection()?;
 		let existing_items = load_all_media_items(&connection)?;
@@ -632,6 +655,9 @@ impl DatabaseInfrastructure {
 				.entry(media_match_key(item))
 				.or_default()
 				.push_back(item.id.clone());
+			if let Some(key) = tmdb_match_key(item) {
+				existing_ids_by_match_key.entry(key).or_default().push_back(item.id.clone());
+			}
 		}
 
 		let transaction = connection.transaction().map_err(|error| error.to_string())?;
@@ -733,8 +759,14 @@ impl DatabaseInfrastructure {
 					resolved_item.show_id = Some(parent_id.clone());
 				}
 
+				// An item keeps its id when its files move: same path, else same
+				// TMDb id (renamed folder), else same title/numbering.
 				let resolved_id = if existing_ids.contains(&resolved_item.id) && !claimed_ids.contains(&resolved_item.id) {
 					resolved_item.id.clone()
+				} else if let Some(existing_id) = tmdb_match_key(&resolved_item)
+					.and_then(|key| take_next_matching_id(&mut existing_ids_by_match_key, &key, &claimed_ids))
+				{
+					existing_id
 				} else if let Some(existing_id) = take_next_matching_id(
 					&mut existing_ids_by_match_key,
 					&media_match_key(&resolved_item),
@@ -854,6 +886,21 @@ impl DatabaseInfrastructure {
 			}
 		}
 
+		if !prune {
+			transaction
+				.execute(
+					"
+					INSERT OR REPLACE INTO media_item_directors (media_item_id, director_id, ordinal)
+					SELECT media_item_id, director_id, ordinal
+					FROM scanned_media_director_links
+					",
+					[]
+				)
+				.map_err(|error| error.to_string())?;
+
+			return transaction.commit().map_err(|error| error.to_string());
+		}
+
 		transaction
 			.execute(
 				"DELETE FROM media_items WHERE id NOT IN (SELECT id FROM scanned_media_ids)",
@@ -898,6 +945,23 @@ impl DatabaseInfrastructure {
 			.map_err(|error| error.to_string())?;
 
 		transaction.commit().map_err(|error| error.to_string())
+	}
+
+	/// Forgets which directors an item is linked to; a re-index adds the current ones back.
+	pub fn clear_director_links(&self, media_id: &str) -> Result<(), String> {
+		self.connection()?
+			.execute("DELETE FROM media_item_directors WHERE media_item_id = ?1", params![media_id])
+			.map(|_| ())
+			.map_err(|error| error.to_string())
+	}
+
+	/// Drops a show's episode rows so a re-index after renames doesn't leave
+	/// the old file names behind (ids are file paths and upserts never prune).
+	pub fn delete_show_episodes(&self, show_id: &str) -> Result<(), String> {
+		self.connection()?
+			.execute("DELETE FROM media_items WHERE media_type = 'show_episode' AND show_id = ?1", params![show_id])
+			.map(|_| ())
+			.map_err(|error| error.to_string())
 	}
 
 	pub fn clear_all_data(&self) -> Result<(), String> {
@@ -1016,14 +1080,32 @@ fn take_next_matching_id(
 	None
 }
 
+/// Top-level items identified on TMDb match by that id, so renaming a folder
+/// to the library contract doesn't make the item look new.
+fn tmdb_match_key(item: &MediaItemRecord) -> Option<String> {
+	if matches!(item.media_type.as_str(), "show_episode" | "music_album" | "music_track" | "music_artist") {
+		return None;
+	}
+	let tmdb_id = item.tmdb_id.as_deref().map(str::trim).filter(|id| !id.is_empty())?;
+	Some(format!("tmdb|{}|{}", item.media_type, tmdb_id))
+}
+
 fn media_match_key(item: &MediaItemRecord) -> String {
 	match item.media_type.as_str() {
-		"show_episode" => format!(
-			"{}|{}|{}|{}|{}",
+		// Numbered episodes match by show and number (titles get renamed);
+		// unnumbered ones (specials, extras) by title.
+		"show_episode" if item.episode_number.is_some() => format!(
+			"{}|{}|{}|{}",
 			item.media_type,
 			normalize_identity_fragment(&parent_label(item.show_id.as_deref())),
 			item.season_number.unwrap_or_default(),
-			item.episode_number.unwrap_or_default(),
+			item.episode_number.unwrap_or_default()
+		),
+		"show_episode" => format!(
+			"{}|{}|{}|{}",
+			item.media_type,
+			normalize_identity_fragment(&parent_label(item.show_id.as_deref())),
+			item.season_number.unwrap_or_default(),
 			normalize_identity_fragment(&item.title)
 		),
 		"music_album" => format!(

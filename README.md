@@ -14,7 +14,8 @@ This repository is no longer just a scaffold. The current MVP already includes:
 - Inline album playback with play/pause, playlist, progress, and seeking directly on the album detail page.
 - Local metadata enrichment for movies and TV series via folder-level config files and companion artwork.
 - Full offline behavior during scanning.
-- Remote OMDb/TMDb helpers remain in the codebase, but they are not part of the active scan flow.
+- Remote metadata comes from TMDb only.
+- A `+` button in the top bar adds one folder without rescanning the drive (see "Adding a folder").
 
 ## Core product behavior
 
@@ -136,18 +137,15 @@ Remote enrichment helpers currently target:
 
 They are intentionally kept out of the active scanner flow for now. The environment variables and backend integration remain in the codebase for future reintroduction.
 
-Supported environment variables:
+The TMDb key is set in Settings (or read from a `TMDB_API_KEY.txt` file at a library root during a rescan).
 
-- `OMDB_API_KEY`
-- `TMDB_API_KEY`
+## Adding a folder
 
-Example PowerShell session:
+The `+` button in the top bar opens a drop zone. Drag a folder or one or more files (or pick them) and NetCrico:
 
-```powershell
-$env:OMDB_API_KEY = "your-omdb-key"
-$env:TMDB_API_KEY = "your-tmdb-key"
-npm run tauri:dev
-```
+1. Identifies it. With an Anthropic API key (Settings), a Claude agent reads the file names, searches your library and TMDb (and the web when names are ambiguous), and decides the category, title, year, TMDb ID and whether it is a new season of a show you already have. Without a key, it guesses from the folder name.
+2. Shows a dry run: every source file and the formatted path it will be copied to (`movies/Title (Year)/Title (Year).mkv`, `shows/Title (Year)/Season 02/S02E01 - Episode Name.mkv`, subtitles next to their video). You can change the category (re-runs the agent), title, year, TMDb ID or default season and rebuild the plan.
+3. Copies the files (originals are left untouched), writes `.local-cinema.json` with the TMDb ID, fetches the metadata and poster, and indexes just that item.
 
 If the keys are missing, invalid, or the machine is offline, the app still behaves like a purely local media center. At the moment, that is also the default scan behavior even when the keys are present.
 
@@ -227,7 +225,7 @@ Frontend responsibilities:
 - `rusqlite` with bundled SQLite
 - `walkdir` for recursive scanning
 - `lofty` for audio metadata and embedded cover extraction
-- `reqwest` for optional OMDb/TMDb metadata enrichment
+- `reqwest` for optional TMDb metadata enrichment and the import agent
 - `libmpv2` for native video playback
 
 Backend responsibilities:
@@ -273,7 +271,8 @@ src-tauri/src/
 	infrastructure/   SQLite and low-level runtime integrations
 	modules/library/  Library queries over the database
 	modules/scanner/  Filesystem scanning and normalization
-	modules/metadata/ Optional OMDb/TMDb enrichment and local metadata resolution
+	modules/metadata/ Optional TMDb enrichment and local metadata resolution
+	modules/importer/ The + flow: identify a dropped folder, dry-run plan, copy and index
 	modules/player/   Embedded libmpv lifecycle and control
 ```
 

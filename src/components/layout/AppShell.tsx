@@ -1,5 +1,7 @@
+import { ImportDialog } from "@/features/library/components/ImportDialog";
 import { useCatalogFiltersStore } from "@/features/library/store/catalogFilters.store";
 import { invokeCommand } from "@/services/tauri/client/invoke";
+import AddRoundedIcon from "@mui/icons-material/AddRounded";
 import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
 import FilterListRoundedIcon from "@mui/icons-material/FilterListRounded";
 import SettingsRoundedIcon from "@mui/icons-material/SettingsRounded";
@@ -92,6 +94,7 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const [filtersAnchor, setFiltersAnchor] = useState<HTMLElement | null>(null);
+  const [isImportOpen, setIsImportOpen] = useState(false);
   const searchQuery = useCatalogFiltersStore((state) => state.searchQuery);
   const selectedDecade = useCatalogFiltersStore((state) => state.selectedDecade);
   const selectedGenres = useCatalogFiltersStore((state) => state.selectedGenres);
@@ -269,6 +272,17 @@ export function AppShell() {
               Novos
             </Button>
 
+            <Tooltip title="Adicionar a biblioteca">
+              <IconButton
+                aria-label="Adicionar a biblioteca"
+                color="inherit"
+                onClick={() => setIsImportOpen(true)}
+                sx={{ border: "1px solid rgba(255,255,255,0.12)" }}
+              >
+                <AddRoundedIcon />
+              </IconButton>
+            </Tooltip>
+
             <Tooltip title={activeFilterCount > 0 ? `Filtros ativos: ${activeFilterCount}` : "Filtros"}>
               <IconButton
                 aria-label="Abrir filtros"
@@ -442,6 +456,8 @@ export function AppShell() {
           </Box>
         </Stack>
       </Popover>
+
+      <ImportDialog onClose={() => setIsImportOpen(false)} open={isImportOpen} />
 
       <Box component="main" sx={{ p: 3 }}>
         <Outlet />

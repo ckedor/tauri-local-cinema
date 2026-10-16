@@ -1,5 +1,10 @@
 use crate::app::state::AppState;
-use crate::contracts::player::{PlayerRectDto, PlayerSessionDto, PlayerStatusDto};
+use crate::contracts::player::{PlayerRectDto, PlayerSessionDto, PlayerStatusDto, SubtitleFileDto, SubtitleTrackDto};
+use crate::modules::importer::{ImportIdentity, ImportPlanDto, ImporterModule};
+use crate::modules::refresh::subtitles::{self, SeasonSubtitlesDto, SubtitleDownload, SubtitleDownloadResultDto};
+use crate::modules::refresh::sync::SyncSummary;
+use crate::modules::refresh::{RefreshModule, RefreshPlanDto, RefreshResultDto, RefreshSelection};
+use crate::modules::settings::SubtitleSettings;
 use crate::modules::library::LibraryModule;
 use crate::modules::portable_state::PortableStateModule;
 use crate::modules::scanner::ScannerModule;
@@ -10,6 +15,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 use tauri::{AppHandle, State};
+
+// Commands marked (async) run on a worker thread. Plain sync commands run on the
+// main (GTK/UI) thread: anything that reads the disk or the database there
+// freezes the window until it returns, which on Linux, with a library on a USB
+// drive, can be minutes. Only the file dialog, exit and the player (its native
+// window lives on the main thread on Windows) stay sync.
 
 #[tauri::command]
 pub fn ping() -> &'static str {
@@ -65,7 +76,7 @@ pub struct InitialSetupStatusDto {
 #[serde(rename_all = "camelCase")]
 pub struct MetadataApiSettingsDto {
   pub tmdb_api_key: Option<String>,
-  pub omdb_api_key: Option<String>
+  pub anthropic_api_key: Option<String>
 }
 
 #[derive(Debug, Serialize)]
@@ -164,7 +175,7 @@ pub struct MovieDirectorDetailDto {
   pub movies: Vec<MediaItemDto>
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_initial_setup_status(state: State<'_, AppState>) -> Result<InitialSetupStatusDto, String> {
   let library_root_paths = SettingsModule::library_root_paths(&state)?;
   let media_count = LibraryModule::list_media(&state)?.len();
@@ -185,57 +196,209 @@ pub fn pick_library_root() -> Option<String> {
 }
 
 #[tauri::command]
+pub fn pick_import_files() -> Vec<String> {
+  FileDialog::new()
+    .add_filter("Video e legenda", &["mkv", "mp4", "avi", "mov", "wmv", "m4v", "webm", "srt", "ass", "ssa", "vtt", "sub"])
+    .pick_files()
+    .unwrap_or_default()
+    .into_iter()
+    .map(|path| path.to_string_lossy().to_string())
+    .collect()
+}
+
+#[tauri::command(async)]
 pub fn save_library_root(state: State<'_, AppState>, path: String) -> Result<(), String> {
   SettingsModule::save_library_root_path(&state, &path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_library_roots(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
   SettingsModule::save_library_root_paths(&state, &paths)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_metadata_api_settings(state: State<'_, AppState>) -> Result<MetadataApiSettingsDto, String> {
   let settings = SettingsModule::metadata_api_keys(&state)?;
 
   Ok(MetadataApiSettingsDto {
     tmdb_api_key: settings.tmdb_api_key,
-    omdb_api_key: settings.omdb_api_key
+    anthropic_api_key: settings.anthropic_api_key
   })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_metadata_api_settings(
   state: State<'_, AppState>,
   tmdb_api_key: Option<String>,
-  omdb_api_key: Option<String>
+  anthropic_api_key: Option<String>
 ) -> Result<(), String> {
-  SettingsModule::save_metadata_api_keys(&state, tmdb_api_key.as_deref(), omdb_api_key.as_deref())
+  SettingsModule::save_metadata_api_keys(&state, tmdb_api_key.as_deref(), anthropic_api_key.as_deref())
+}
+
+// Scans fetch TMDb metadata with blocking HTTP, which panics on the async
+// runtime, so they run on the blocking pool.
+
+#[tauri::command]
+pub async fn start_initial_scan(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || ScannerModule::rescan_library(&state, Some(app)))
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn start_initial_scan(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
-  ScannerModule::rescan_library(&state, Some(app))
+pub async fn rescan_library(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || ScannerModule::rescan_library(&state, Some(app)))
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn rescan_library(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
-  ScannerModule::rescan_library(&state, Some(app))
+pub async fn reset_library_database_and_rescan(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || ScannerModule::reset_and_scan_library(&state, Some(app)))
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+// The import commands call TMDb and Anthropic with blocking HTTP, which
+// panics on the async runtime (and the UI then waits forever), so they run on
+// the blocking pool.
+
+/// Identifies a dropped folder or files and returns the dry-run plan (nothing is written).
+#[tauri::command]
+pub async fn import_preview(
+  app: AppHandle,
+  state: State<'_, AppState>,
+  source_paths: Vec<String>,
+  category: Option<String>
+) -> Result<ImportPlanDto, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || ImporterModule::preview(&state, Some(app), &source_paths, category))
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Rebuilds the plan after the user edits the identity, without the agent.
+#[tauri::command]
+pub async fn import_rebuild_plan(state: State<'_, AppState>, identity: ImportIdentity) -> Result<ImportPlanDto, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || ImporterModule::build_plan(&state, identity))
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-pub fn reset_library_database_and_rescan(app: AppHandle, state: State<'_, AppState>) -> Result<usize, String> {
-  ScannerModule::reset_and_scan_library(&state, Some(app))
+pub async fn import_apply(app: AppHandle, state: State<'_, AppState>, identity: ImportIdentity) -> Result<String, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || ImporterModule::apply(&state, Some(app), identity))
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// "Atualizar" dry run for a show: metadata, artwork and episode renames (nothing is written).
+#[tauri::command]
+pub async fn refresh_preview(
+  app: AppHandle,
+  state: State<'_, AppState>,
+  media_id: String,
+  tmdb_id: Option<String>
+) -> Result<RefreshPlanDto, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || RefreshModule::preview(&state, Some(app), &media_id, tmdb_id))
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
+pub async fn refresh_apply(app: AppHandle, state: State<'_, AppState>, selection: RefreshSelection) -> Result<RefreshResultDto, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || RefreshModule::apply(&state, Some(app), selection))
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn subtitles_search(
+  app: AppHandle,
+  state: State<'_, AppState>,
+  media_id: String,
+  season_number: Option<i32>
+) -> Result<SeasonSubtitlesDto, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || subtitles::search(&state, Some(app), &media_id, season_number, None))
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn subtitles_download(
+  app: AppHandle,
+  state: State<'_, AppState>,
+  media_id: String,
+  downloads: Vec<SubtitleDownload>
+) -> Result<SubtitleDownloadResultDto, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || subtitles::download(&state, Some(app), &media_id, downloads))
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Aligns the subtitle files already downloaded for a season (or every season).
+#[tauri::command]
+pub async fn subtitles_sync_existing(
+  app: AppHandle,
+  state: State<'_, AppState>,
+  media_id: String,
+  season_number: Option<i32>
+) -> Result<SyncSummary, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || subtitles::sync_existing(&state, Some(app), &media_id, season_number))
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// One click on an episode without subtitles: search and download the best
+/// one for each configured language.
+#[tauri::command]
+pub async fn subtitles_fetch_episode(
+  app: AppHandle,
+  state: State<'_, AppState>,
+  media_id: String,
+  episode_id: String
+) -> Result<SubtitleDownloadResultDto, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || {
+    let found = subtitles::search(&state, Some(app.clone()), &media_id, None, Some(&episode_id))?;
+    if found.offers.is_empty() {
+      return Err(found.notes.first().cloned().unwrap_or_else(|| "Nenhuma legenda encontrada.".to_string()));
+    }
+    let downloads = found.offers.into_iter().map(|offer| SubtitleDownload { file_id: offer.file_id, target_path: offer.target_path, episode_id: offer.episode_id, embedded_track: offer.embedded_track }).collect();
+    subtitles::download(&state, Some(app), &media_id, downloads)
+  })
+  .await
+  .map_err(|error| error.to_string())?
+}
+
+#[tauri::command(async)]
+pub fn get_subtitle_settings(state: State<'_, AppState>) -> Result<SubtitleSettings, String> {
+  SettingsModule::subtitle_settings(&state)
+}
+
+#[tauri::command(async)]
+pub fn save_subtitle_settings(state: State<'_, AppState>, settings: SubtitleSettings) -> Result<(), String> {
+  SettingsModule::save_subtitle_settings(&state, &settings)
+}
+
+#[tauri::command(async)]
 pub fn list_home_media(state: State<'_, AppState>) -> Result<Vec<MediaItemDto>, String> {
   LibraryModule::list_media(&state).map(|items| {
     items.into_iter().map(to_media_item_dto).collect()
   })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_portable_new_items(state: State<'_, AppState>) -> Result<Vec<NewItemEntryDto>, String> {
   PortableStateModule::list_new_items(&state).map(|items| {
     items
@@ -248,7 +411,7 @@ pub fn list_portable_new_items(state: State<'_, AppState>) -> Result<Vec<NewItem
   })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn upsert_portable_new_item(
   state: State<'_, AppState>,
   media_path: String,
@@ -258,17 +421,17 @@ pub fn upsert_portable_new_item(
   PortableStateModule::upsert_new_item(&state, &media_path, &media_type, added_at)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_portable_new_item(state: State<'_, AppState>, media_path: String) -> Result<(), String> {
   PortableStateModule::remove_new_item(&state, &media_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_media_item(state: State<'_, AppState>, media_id: String) -> Result<Option<MediaItemDto>, String> {
   LibraryModule::get_media_item(&state, &media_id).map(|item| item.map(to_media_item_dto))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_show_detail(state: State<'_, AppState>, show_id: String) -> Result<ShowDetailDto, String> {
   let episodes = LibraryModule::list_show_episodes(&state, &show_id)?;
   let mut seasons = BTreeMap::<i32, Vec<ShowEpisodeDto>>::new();
@@ -297,7 +460,7 @@ pub fn get_show_detail(state: State<'_, AppState>, show_id: String) -> Result<Sh
   })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_music_artist_detail(
   state: State<'_, AppState>,
   artist_id: String
@@ -310,17 +473,24 @@ pub fn get_music_artist_detail(
   })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_music_albums(state: State<'_, AppState>) -> Result<Vec<MediaItemDto>, String> {
   LibraryModule::list_all_music_albums(&state).map(|items| items.into_iter().map(to_media_item_dto).collect())
 }
 
+/// Downloads missing director photos from TMDb (blocking HTTP), so it runs on
+/// the blocking pool like the scans.
 #[tauri::command]
-pub fn list_movie_directors(state: State<'_, AppState>) -> Result<Vec<DirectorDto>, String> {
-  LibraryModule::list_movie_directors(&state).map(|directors| directors.into_iter().map(to_director_dto).collect())
+pub async fn list_movie_directors(state: State<'_, AppState>) -> Result<Vec<DirectorDto>, String> {
+  let state = state.inner().clone();
+  tauri::async_runtime::spawn_blocking(move || {
+    LibraryModule::list_movie_directors(&state).map(|directors| directors.into_iter().map(to_director_dto).collect())
+  })
+  .await
+  .map_err(|error| error.to_string())?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_movie_director_detail(
   state: State<'_, AppState>,
   director_id: String
@@ -339,7 +509,7 @@ pub fn get_movie_director_detail(
   }))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_music_album_detail(
   state: State<'_, AppState>,
   album_id: String
@@ -484,4 +654,42 @@ pub fn player_stop(state: State<'_, AppState>) -> Result<PlayerStatusDto, String
 pub fn player_status(state: State<'_, AppState>) -> Result<PlayerStatusDto, String> {
   let engine = state.player.lock().map_err(|_| "player lock".to_string())?;
   Ok(engine.status())
+}
+
+#[tauri::command]
+pub fn player_subtitle_tracks(state: State<'_, AppState>) -> Result<Vec<SubtitleTrackDto>, String> {
+  let engine = state.player.lock().map_err(|_| "player lock".to_string())?;
+  Ok(engine.subtitle_tracks())
+}
+
+#[tauri::command]
+pub fn player_set_subtitle(state: State<'_, AppState>, id: Option<String>) -> Result<(), String> {
+  let mut engine = state.player.lock().map_err(|_| "player lock".to_string())?;
+  engine.set_subtitle(id)
+}
+
+/// The subtitle files of one video (the <video> player loads them as tracks).
+#[tauri::command(async)]
+pub fn list_video_subtitles(media_path: String) -> Vec<SubtitleFileDto> {
+  crate::modules::scanner::list_video_subtitles(std::path::Path::new(&media_path))
+    .into_iter()
+    .map(|(path, tag)| SubtitleFileDto { path: path.to_string_lossy().to_string(), tag })
+    .collect()
+}
+
+/// Where the <video> player on Linux reads files from (see media_server.rs);
+/// None where there is no media server (Windows, which plays through mpv).
+#[tauri::command]
+pub fn media_server_url(app: AppHandle) -> Option<String> {
+  use tauri::Manager;
+  app
+    .try_state::<crate::infrastructure::media_server::MediaServer>()
+    .map(|server| server.base_url.clone())
+}
+
+/// Lets the UI report problems it handles silently (a video falling back to
+/// mpv, for instance) to the terminal running the app.
+#[tauri::command]
+pub fn log_frontend(message: String) {
+  eprintln!("[frontend] {message}");
 }

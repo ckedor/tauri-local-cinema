@@ -1,3 +1,4 @@
+import { attachVideoElement, isLinuxWebview } from "@/services/player/htmlVideo";
 import { VolumeControl } from "@/features/player/components/VolumeControl";
 import {
     createContinueWatchingEntry,
@@ -21,15 +22,21 @@ import {
     playerSeekTo,
     playerSetMuted,
     playerSetRect,
+    playerSetSubtitle,
     playerSetVolume,
     PlayerStatus,
     playerStatus,
     playerStop,
-    playerTogglePause
+    playerSubtitleTracks,
+    playerTogglePause,
+    SubtitleTrack
 } from "@/services/tauri/commands/player";
 import { PLAYER_EVENTS } from "@/services/tauri/events/player";
-import { ShowEpisodeDto } from "@/types/contracts/library";
+import { ShowEpisodeDto, EXTRAS_SEASON } from "@/types/contracts/library";
 import {
+    Check as CheckIcon,
+    ClosedCaption as ClosedCaptionIcon,
+    ClosedCaptionDisabled as ClosedCaptionDisabledIcon,
     Close as CloseIcon,
     FullscreenExit as FullscreenExitIcon,
     Fullscreen as FullscreenIcon,
@@ -37,7 +44,7 @@ import {
     PlayArrow as PlayArrowIcon,
     Stop as StopIcon
 } from "@mui/icons-material";
-import { Box, ButtonBase, IconButton, Slider, Stack, Typography } from "@mui/material";
+import { Box, ButtonBase, IconButton, ListItemIcon, Menu, MenuItem, Slider, Stack, Typography } from "@mui/material";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -72,6 +79,8 @@ export function EmbeddedPlayerPage() {
   const [scrubValue, setScrubValue] = useState(0);
   const [playerVolumeState, setPlayerVolumeState] = useState<PlaybackVolumeState>(() => initialPlayerVolumeState.current);
   const [showEpisodeQueue, setShowEpisodeQueue] = useState<ShowEpisodeDto[]>([]);
+  const [subtitleMenuAnchor, setSubtitleMenuAnchor] = useState<HTMLElement | null>(null);
+  const [subtitleTracks, setSubtitleTracks] = useState<SubtitleTrack[]>([]);
   const autoAdvancedEpisodeIdRef = useRef<string | null>(null);
 
   const measureRect = useCallback(() => {
@@ -406,11 +415,17 @@ export function EmbeddedPlayerPage() {
     };
   }, [isFullscreen, revealFullscreenChrome]);
 
-  // Poll position/duration while playing.
+  // Poll position/duration while playing. On Linux the video plays in mpv's
+  // own window: when the user closes it, playback stops (isPlaying goes false)
+  // and the session ends as if Stop was pressed, keeping the last position.
   useEffect(() => {
     const id = window.setInterval(async () => {
       try {
         const s = await playerStatus();
+        if (latestStatusRef.current?.isPlaying && !s.isPlaying) {
+          void stopRef.current();
+          return;
+        }
         setStatus(s);
       } catch {
         /* ignore */
@@ -445,6 +460,9 @@ export function EmbeddedPlayerPage() {
       setError(asMessage(e));
     }
   }
+
+  const stopRef = useRef(handleStop);
+  stopRef.current = handleStop;
 
   async function handleStop() {
     syncContinueWatching(latestStatusRef.current, true);
@@ -719,7 +737,17 @@ export function EmbeddedPlayerPage() {
             inset: 0,
             backgroundColor: "#000"
           }}
-        />
+        >
+          {/* Linux plays here (see services/player/htmlVideo.ts); on Windows mpv
+              draws over this box from a native child window. */}
+          {isLinuxWebview ? (
+            <video
+              ref={attachVideoElement}
+              onDoubleClick={toggleFullscreen}
+              style={{ width: "100%", height: "100%", objectFit: "contain", display: "block" }}
+            />
+          ) : null}
+        </Box>
 
         {isAudioSession ? (
           <Box
@@ -929,6 +957,47 @@ export function EmbeddedPlayerPage() {
           <Box sx={{ flex: 1 }} />
 
           <IconButton
+            aria-label="Legendas"
+            onClick={(event) => {
+              const anchor = event.currentTarget;
+              // Read on open: embedded tracks show up only once the file is loaded.
+              void playerSubtitleTracks()
+                .catch(() => [] as SubtitleTrack[])
+                .then((tracks) => {
+                  setSubtitleTracks(tracks);
+                  setSubtitleMenuAnchor(anchor);
+                });
+            }}
+            sx={{ color: "rgba(255,255,255,0.85)" }}
+          >
+            {subtitleTracks.some((track) => track.selected) || !subtitleTracks.length ? <ClosedCaptionIcon /> : <ClosedCaptionDisabledIcon />}
+          </IconButton>
+          <Menu
+            anchorEl={subtitleMenuAnchor}
+            open={Boolean(subtitleMenuAnchor)}
+            onClose={() => setSubtitleMenuAnchor(null)}
+            anchorOrigin={{ vertical: "top", horizontal: "right" }}
+            transformOrigin={{ vertical: "bottom", horizontal: "right" }}
+          >
+            {[{ id: null, label: "Desligadas", selected: !subtitleTracks.some((track) => track.selected) }, ...subtitleTracks].map((track) => (
+              <MenuItem
+                key={track.id ?? "off"}
+                selected={track.selected}
+                onClick={() => {
+                  setSubtitleMenuAnchor(null);
+                  void playerSetSubtitle(track.id).then(() =>
+                    setSubtitleTracks((current) => current.map((entry) => ({ ...entry, selected: entry.id === track.id })))
+                  );
+                }}
+              >
+                <ListItemIcon>{track.selected ? <CheckIcon fontSize="small" /> : null}</ListItemIcon>
+                {track.label}
+              </MenuItem>
+            ))}
+            {!subtitleTracks.length ? <MenuItem disabled>Nenhuma legenda neste arquivo</MenuItem> : null}
+          </Menu>
+
+          <IconButton
             onClick={() => void toggleFullscreen()}
             sx={{ color: "rgba(255,255,255,0.85)" }}
           >
@@ -988,8 +1057,12 @@ function formatShowEpisodeTitle(showTitle: string, episode: ShowEpisodeDto): str
 }
 
 function formatShowEpisodeLabel(episode: ShowEpisodeDto): string {
+  if (episode.seasonNumber === EXTRAS_SEASON) {
+    return "Extra";
+  }
+
   if (episode.seasonNumber === 0) {
-    return episode.episodeNumber ? `Extra ${String(episode.episodeNumber).padStart(2, "0")}` : "Extra";
+    return episode.episodeNumber ? `Especial ${String(episode.episodeNumber).padStart(2, "0")}` : "Especial";
   }
 
   const episodePart = episode.episodeNumber ? `E${String(episode.episodeNumber).padStart(2, "0")}` : "EP";
